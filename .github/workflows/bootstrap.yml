@@ -352,7 +352,7 @@ jobs:
           }
           EOF
 
-          cat > .github/workflows/build.yml <<'EOF'
+          
           name: Build CHESS VISION APK
 
           on:
@@ -420,6 +420,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add settings.gradle.kts build.gradle.kts gradle.properties app .github/workflows/build.yml README.md
+          git add settings.gradle.kts build.gradle.kts gradle.properties app README.md
           git commit -m "Generate CHESS VISION Android project" || echo "No changes to commit"
           git push
