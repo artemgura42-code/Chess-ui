@@ -350,10 +350,7 @@ jobs:
               Spacer(Modifier.height(14.dp))
               Text(description, color = Muted, fontSize = 15.sp)
           }
-          EOF
-
           
-          name: Build CHESS VISION APK
 
           on:
             push:
