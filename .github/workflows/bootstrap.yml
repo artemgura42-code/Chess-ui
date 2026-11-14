@@ -1,0 +1,425 @@
+
+name: Bootstrap CHESS VISION
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-project:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create project files
+        shell: bash
+        run: |
+          mkdir -p app/src/main/java/com/chessvision/app
+          mkdir -p app/src/main
+          mkdir -p .github/workflows
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "CHESS VISION"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          android {
+              namespace = "com.chessvision.app"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.chessvision.app"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "0.1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              buildFeatures {
+                  compose = true
+              }
+          }
+
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.12.01"))
+              implementation("androidx.activity:activity-compose:1.9.3")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              implementation("androidx.compose.material3:material3")
+              debugImplementation("androidx.compose.ui:ui-tooling")
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:allowBackup="true"
+                  android:label="CHESS VISION"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/chessvision/app/MainActivity.kt <<'EOF'
+          package com.chessvision.app
+
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+
+          private val Background = Color(0xFF090D0B)
+          private val Panel = Color(0xFF151D18)
+          private val Lime = Color(0xFFB7F34A)
+          private val Muted = Color(0xFF9AA69D)
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent {
+                      ChessVisionApp()
+                  }
+              }
+          }
+
+          @Composable
+          fun ChessVisionApp() {
+              var selectedTab by remember { mutableIntStateOf(0) }
+              val tabs = listOf("Главная", "Тренировка", "История", "Настройки")
+
+              MaterialTheme(
+                  colorScheme = darkColorScheme(
+                      background = Background,
+                      surface = Panel,
+                      primary = Lime,
+                      onPrimary = Color.Black,
+                      onBackground = Color.White,
+                      onSurface = Color.White
+                  )
+              ) {
+                  Scaffold(
+                      containerColor = Background,
+                      bottomBar = {
+                          NavigationBar(
+                              containerColor = Panel
+                          ) {
+                              tabs.forEachIndexed { index, tab ->
+                                  NavigationBarItem(
+                                      selected = selectedTab == index,
+                                      onClick = { selectedTab = index },
+                                      icon = {
+                                          Text(
+                                              text = listOf("♟", "♞", "◷", "⚙")[index],
+                                              fontSize = 20.sp
+                                          )
+                                      },
+                                      label = { Text(tab) }
+                                  )
+                              }
+                          }
+                      }
+                  ) { padding ->
+                      Column(
+                          modifier = Modifier
+                              .fillMaxSize()
+                              .background(Background)
+                              .padding(padding)
+                              .padding(22.dp)
+                      ) {
+                          Text(
+                              "CHESS VISION",
+                              color = Lime,
+                              fontSize = 13.sp,
+                              fontWeight = FontWeight.Bold,
+                              letterSpacing = 3.sp
+                          )
+
+                          Spacer(Modifier.height(28.dp))
+
+                          when (selectedTab) {
+                              0 -> HomeScreen()
+                              1 -> InfoScreen(
+                                  "Тренировка",
+                                  "Анализируй позиции, изучай лучшие продолжения и развивай шахматное мышление."
+                              )
+                              2 -> InfoScreen(
+                                  "История партий",
+                                  "Здесь появится история твоих завершённых партий."
+                              )
+                              3 -> InfoScreen(
+                                  "Настройки",
+                                  "Настройки приложения и шахматного движка."
+                              )
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun HomeScreen() {
+              Text(
+                  "Твой шахматный\nанализатор.",
+                  color = Color.White,
+                  fontSize = 32.sp,
+                  lineHeight = 39.sp,
+                  fontWeight = FontWeight.Bold
+              )
+
+              Spacer(Modifier.height(12.dp))
+
+              Text(
+                  "Анализируй партии. Изучай ошибки. Становись сильнее.",
+                  color = Muted,
+                  fontSize = 15.sp
+              )
+
+              Spacer(Modifier.height(30.dp))
+
+              Card(
+                  colors = CardDefaults.cardColors(containerColor = Panel),
+                  shape = RoundedCornerShape(22.dp),
+                  modifier = Modifier.fillMaxWidth()
+              ) {
+                  Column(Modifier.padding(20.dp)) {
+                      Text(
+                          "АНАЛИЗ ПОЗИЦИИ",
+                          color = Lime,
+                          fontSize = 12.sp,
+                          fontWeight = FontWeight.Bold,
+                          letterSpacing = 1.5.sp
+                      )
+
+                      Spacer(Modifier.height(12.dp))
+
+                      Text(
+                          "Stockfish 10",
+                          color = Color.White,
+                          fontSize = 24.sp,
+                          fontWeight = FontWeight.Bold
+                      )
+
+                      Spacer(Modifier.height(8.dp))
+
+                      Text(
+                          "Шахматный движок для анализа завершённых партий и тренировочных позиций.",
+                          color = Muted,
+                          fontSize = 14.sp
+                      )
+
+                      Spacer(Modifier.height(20.dp))
+
+                      Button(
+                          onClick = {},
+                          modifier = Modifier.fillMaxWidth(),
+                          colors = ButtonDefaults.buttonColors(
+                              containerColor = Lime,
+                              contentColor = Color.Black
+                          ),
+                          shape = RoundedCornerShape(13.dp)
+                      ) {
+                          Text(
+                              "Начать анализ",
+                              fontWeight = FontWeight.Bold
+                          )
+                      }
+                  }
+              }
+
+              Spacer(Modifier.height(20.dp))
+
+              Text(
+                  "ВОЗМОЖНОСТИ",
+                  color = Muted,
+                  fontSize = 12.sp,
+                  fontWeight = FontWeight.Bold,
+                  letterSpacing = 2.sp
+              )
+
+              Spacer(Modifier.height(12.dp))
+
+              FeatureCard("♟", "Анализ партий", "Разбор завершённых шахматных партий")
+              Spacer(Modifier.height(10.dp))
+              FeatureCard("♞", "Stockfish 10", "Локальный шахматный движок")
+              Spacer(Modifier.height(10.dp))
+              FeatureCard("◈", "Lichess", "Работа с историей партий и тренировками")
+          }
+
+          @Composable
+          fun FeatureCard(icon: String, title: String, description: String) {
+              Row(
+                  modifier = Modifier
+                      .fillMaxWidth()
+                      .background(Panel, RoundedCornerShape(15.dp))
+                      .padding(15.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Text(icon, color = Lime, fontSize = 25.sp)
+                  Spacer(Modifier.width(14.dp))
+                  Column {
+                      Text(title, color = Color.White, fontWeight = FontWeight.Bold)
+                      Text(description, color = Muted, fontSize = 12.sp)
+                  }
+              }
+          }
+
+          @Composable
+          fun InfoScreen(title: String, description: String) {
+              Text(
+                  title,
+                  color = Color.White,
+                  fontSize = 30.sp,
+                  fontWeight = FontWeight.Bold
+              )
+              Spacer(Modifier.height(14.dp))
+              Text(description, color = Muted, fontSize = 15.sp)
+          }
+          EOF
+
+          cat > .github/workflows/build.yml <<'EOF'
+          name: Build CHESS VISION APK
+
+          on:
+            push:
+              branches: [main, master]
+            workflow_dispatch:
+
+          permissions:
+            contents: read
+
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+
+              steps:
+                - name: Checkout
+                  uses: actions/checkout@v4
+
+                - name: Set up JDK 17
+                  uses: actions/setup-java@v4
+                  with:
+                    distribution: temurin
+                    java-version: 17
+
+                - name: Set up Gradle
+                  uses: gradle/actions/setup-gradle@v4
+                  with:
+                    gradle-version: 8.9
+
+                - name: Build APK
+                  run: gradle assembleDebug
+
+                - name: Upload APK
+                  uses: actions/upload-artifact@v4
+                  with:
+                    name: chess-vision-debug-apk
+                    path: app/build/outputs/apk/debug/app-debug.apk
+          EOF
+
+          cat > README.md <<'EOF'
+          # CHESS VISION
+
+          Android chess analysis application.
+
+          ## Current version
+          0.1.0
+
+          ## Technology
+          - Kotlin
+          - Jetpack Compose
+          - Stockfish 10 planned
+          - Lichess integration planned
+
+          ## Build
+          Run `gradle assembleDebug`.
+
+          APK output:
+          `app/build/outputs/apk/debug/app-debug.apk`
+
+          External engine analysis is intended for completed games,
+          training positions and games against Lichess AI.
+          EOF
+
+      - name: Commit generated files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add settings.gradle.kts build.gradle.kts gradle.properties app .github/workflows/build.yml README.md
+          git commit -m "Generate CHESS VISION Android project" || echo "No changes to commit"
+          git push
