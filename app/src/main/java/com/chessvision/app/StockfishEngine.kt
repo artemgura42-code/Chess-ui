@@ -5,9 +5,10 @@ import android.content.Context
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.Closeable
+import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
-import java.io.File
+import java.util.Locale
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -26,8 +27,17 @@ class StockfishEngine(
 
     private val output = LinkedBlockingQueue<String>()
 
+    companion object {
+        private const val SEARCH_TIME_MS = 1300L
+        private const val SEARCH_TIMEOUT_MS = 6000L
+    }
+
     private fun startEngine() {
         if (process?.isAlive == true) return
+
+        process = null
+        writer = null
+        output.clear()
 
         val engineFile = File(
             context.applicationInfo.nativeLibraryDir,
@@ -46,8 +56,6 @@ class StockfishEngine(
                     engineFile.absolutePath
             )
         }
-
-        output.clear()
 
         val started = try {
             ProcessBuilder(engineFile.absolutePath)
@@ -90,6 +98,7 @@ class StockfishEngine(
 
         send("setoption name Threads value 2")
         send("setoption name Hash value 64")
+        send("setoption name Move Overhead value 50")
         send("isready")
 
         waitFor("readyok", 30)
@@ -110,7 +119,7 @@ class StockfishEngine(
         timeoutSeconds: Long
     ) {
         val deadline = System.currentTimeMillis() +
-            timeoutSeconds * 1000
+            timeoutSeconds * 1000L
 
         while (System.currentTimeMillis() < deadline) {
             val line = output.poll(1, TimeUnit.SECONDS)
@@ -127,7 +136,7 @@ class StockfishEngine(
     @Synchronized
     fun analyze(fen: String): StockfishResult {
 
-        require(fen.split(" ").size == 6) {
+        require(fen.trim().split(Regex("\\s+")).size == 6) {
             "Некорректная FEN-запись"
         }
 
@@ -136,17 +145,18 @@ class StockfishEngine(
         output.clear()
 
         send("position fen $fen")
-        send("go depth 12")
+        send("go movetime $SEARCH_TIME_MS")
 
         var bestMove: String? = null
         var evaluation = "Оценка недоступна"
         var depth = 0
 
-        val deadline = System.currentTimeMillis() + 30000
+        val deadline = System.currentTimeMillis() +
+            SEARCH_TIMEOUT_MS
 
         while (System.currentTimeMillis() < deadline) {
 
-            val line = output.poll(2, TimeUnit.SECONDS)
+            val line = output.poll(250, TimeUnit.MILLISECONDS)
                 ?: continue
 
             if (line.startsWith("info ")) {
@@ -172,7 +182,7 @@ class StockfishEngine(
                         val pawns = value / 100.0
 
                         "%+.2f".format(
-                            java.util.Locale.US,
+                            Locale.US,
                             pawns
                         )
                     }
@@ -187,10 +197,18 @@ class StockfishEngine(
             }
         }
 
-        val move = bestMove
-            ?: throw IllegalStateException(
-                "Stockfish не нашёл лучший ход"
+        if (bestMove == null) {
+            try {
+                send("stop")
+            } catch (_: Exception) {
+            }
+
+            throw IllegalStateException(
+                "Stockfish не завершил анализ за отведённое время"
             )
+        }
+
+        val move = bestMove
 
         if (move == "(none)" || move == "0000") {
             throw IllegalStateException(
@@ -205,6 +223,7 @@ class StockfishEngine(
         )
     }
 
+    @Synchronized
     override fun close() {
         try {
             writer?.write("quit")
@@ -213,8 +232,13 @@ class StockfishEngine(
         } catch (_: Exception) {
         }
 
-        process?.destroy()
+        try {
+            process?.destroy()
+        } catch (_: Exception) {
+        }
+
         process = null
         writer = null
+        output.clear()
     }
 }
