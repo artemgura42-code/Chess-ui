@@ -14,8 +14,12 @@ data class ChessTrackerResult(
 class ChessGameTracker {
 
     companion object {
+        // До 12 полуходов — примерно 6 полных ходов.
         private const val MAX_SEARCH_DEPTH = 12
-        private const val BEAM_WIDTH = 256
+
+        // Увеличиваем ширину поиска для более надёжного
+        // восстановления ранней стадии партии.
+        private const val BEAM_WIDTH = 1024
 
         const val START_PLACEMENT =
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
@@ -39,10 +43,8 @@ class ChessGameTracker {
     }
 
     /**
-     * Начинает отслеживание.
-     *
-     * Сначала пытается восстановить позицию поиском легальных ходов
-     * от начальной расстановки.
+     * Пытается восстановить позицию от начальной расстановки.
+     * Если позиция найдена, очередь хода определяется автоматически.
      */
     @Synchronized
     fun start(
@@ -82,7 +84,7 @@ class ChessGameTracker {
             return ChessTrackerResult(
                 null,
                 null,
-                "Историю партии восстановить не удалось",
+                "Не удалось восстановить историю первых ходов",
                 false,
                 0
             )
@@ -92,20 +94,26 @@ class ChessGameTracker {
         playerColor = detectedPlayerColor
         lastPlacement = initialPlacement
 
-        val status = if (found.path.isEmpty()) {
-            if (detectedPlayerColor == "w") {
-                "Новая партия. Вы играете белыми"
-            } else {
-                "Новая партия. Вы играете чёрными"
-            }
-        } else {
-            val colorText = if (detectedPlayerColor == "w") {
-                "белыми"
-            } else {
-                "чёрными"
-            }
+        val sideToMove =
+            found.board.fen.trim().split(Regex("\\s+")).getOrNull(1)
 
-            "Позиция восстановлена после ${found.path.size} полуходов. Вы играете $colorText"
+        val sideText = if (sideToMove == "w") {
+            "белых"
+        } else {
+            "чёрных"
+        }
+
+        val colorText = if (detectedPlayerColor == "w") {
+            "белыми"
+        } else {
+            "чёрными"
+        }
+
+        val status = if (found.path.isEmpty()) {
+            "Новая партия. Ход белых. Вы играете $colorText"
+        } else {
+            "Автоматически восстановлено ${found.path.size} полуходов. " +
+                "Ход $sideText. Вы играете $colorText"
         }
 
         return ChessTrackerResult(
@@ -118,12 +126,7 @@ class ChessGameTracker {
     }
 
     /**
-     * Восстанавливает позицию без истории партии.
-     *
-     * sideToMove — чей сейчас ход: "w" или "b".
-     *
-     * Права на рокировку и взятие на проходе неизвестны,
-     * поэтому они намеренно сбрасываются.
+     * Восстановление позиции без истории.
      */
     @Synchronized
     fun startFromPosition(
@@ -158,8 +161,6 @@ class ChessGameTracker {
         return try {
             val recoveredBoard = Board()
 
-            // История партии неизвестна:
-            // рокировка и en passant отключены.
             val recoveredFen =
                 "$initialPlacement $sideToMove - - 0 1"
 
@@ -184,7 +185,8 @@ class ChessGameTracker {
             ChessTrackerResult(
                 fen = recoveredBoard.fen,
                 playerColor = detectedPlayerColor,
-                status = "Позиция восстановлена без истории партии. Ход $sideText. Вы играете $playerText",
+                status = "Позиция восстановлена без истории. " +
+                    "Ход $sideText. Вы играете $playerText",
                 advanced = false,
                 movesDetected = 0
             )
@@ -267,7 +269,7 @@ class ChessGameTracker {
     }
 
     /**
-     * Восстанавливает позицию поиском легальных ходов.
+     * Поиск легальной последовательности ходов.
      */
     private fun findPosition(
         startBoard: Board,
@@ -314,6 +316,7 @@ class ChessGameTracker {
 
                     val path = node.path + move.toString()
 
+                    // Точное совпадение расстановки.
                     if (placement == targetPlacement) {
                         return SearchNode(
                             board = nextBoard,
