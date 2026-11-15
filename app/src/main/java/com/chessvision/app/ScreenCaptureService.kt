@@ -24,6 +24,7 @@ import androidx.core.app.NotificationCompat
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class ScreenCaptureService : Service() {
 
@@ -58,7 +59,9 @@ class ScreenCaptureService : Service() {
 
         private const val CHANNEL_ID = "chess_capture_channel"
         private const val NOTIFICATION_ID = 1001
-        private const val FRAME_INTERVAL_MS = 1000L
+
+        // Проверяем экран чаще, чем раньше.
+        private const val FRAME_INTERVAL_MS = 300L
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -70,10 +73,17 @@ class ScreenCaptureService : Service() {
     private val processingExecutor = Executors.newSingleThreadExecutor()
     private val engineExecutor = Executors.newSingleThreadExecutor()
 
+    // Не допускаем накопления очереди старых кадров.
+    private val frameProcessing = AtomicBoolean(false)
+
     private var recognizer: ChessPieceRecognizer? = null
     private val tracker = ChessGameTracker()
 
     private var overlayManager: ChessOverlayManager? = null
+
+    // Один экземпляр Stockfish на всё время работы сервиса.
+    @Volatile
+    private var stockfishEngine: StockfishEngine? = null
 
     private var lastQueuedAt = 0L
 
@@ -86,7 +96,6 @@ class ScreenCaptureService : Service() {
     private var trackedPlayerColor: String? = null
     private var totalMoves = 0
 
-    // Ожидание ручного выбора стороны хода.
     @Volatile
     private var awaitingTurnSelection = false
 
@@ -281,7 +290,21 @@ class ScreenCaptureService : Service() {
             return
         }
 
-        val image = reader.acquireLatestImage() ?: return
+        // Если предыдущий кадр ещё обрабатывается,
+        // пропускаем новый, а не накапливаем очередь.
+        if (!frameProcessing.compareAndSet(false, true)) {
+            val skipped = reader.acquireLatestImage()
+            skipped?.close()
+            return
+        }
+
+        val image = reader.acquireLatestImage()
+
+        if (image == null) {
+            frameProcessing.set(false)
+            return
+        }
+
         lastQueuedAt = now
 
         val bitmap = try {
@@ -293,7 +316,10 @@ class ScreenCaptureService : Service() {
             image.close()
         }
 
-        if (bitmap == null) return
+        if (bitmap == null) {
+            frameProcessing.set(false)
+            return
+        }
 
         try {
             processingExecutor.execute {
@@ -311,12 +337,16 @@ class ScreenCaptureService : Service() {
                     if (!bitmap.isRecycled) {
                         bitmap.recycle()
                     }
+
+                    frameProcessing.set(false)
                 }
             }
         } catch (e: Exception) {
             if (!bitmap.isRecycled) {
                 bitmap.recycle()
             }
+
+            frameProcessing.set(false)
         }
     }
 
@@ -469,7 +499,7 @@ class ScreenCaptureService : Service() {
             candidateCount = 1
         }
 
-        // Требуем два последовательных одинаковых распознавания.
+        // Два одинаковых распознавания для подтверждения позиции.
         if (
             candidateCount < 2 ||
             placement == lastProcessedPlacement
@@ -479,9 +509,8 @@ class ScreenCaptureService : Service() {
         }
 
         /*
-         * Если ждём выбора стороны хода, обновляем ожидаемую
-         * позицию. Если появилась начальная расстановка,
-         * отменяем запрос и автоматически начинаем новую партию.
+         * Если ждём выбора стороны хода, обновляем позицию.
+         * Начальная расстановка автоматически начинает новую партию.
          */
         if (awaitingTurnSelection) {
 
@@ -512,8 +541,8 @@ class ScreenCaptureService : Service() {
         }
 
         /*
-         * Если доска вернулась к начальной расстановке,
-         * это новая партия. Сбрасываем старую историю.
+         * Новая партия обнаружена во время работающей партии.
+         * Захват экрана при этом не перезапускается.
          */
         if (
             gameStarted &&
@@ -573,10 +602,6 @@ class ScreenCaptureService : Service() {
             scheduleStockfishIfNeeded()
 
         } else {
-            /*
-             * Историю восстановить не получилось.
-             * Просим пользователя указать, чей сейчас ход.
-             */
             enterTurnSelection(
                 placement = placement,
                 playerColor = recognized.playerColor
@@ -682,6 +707,7 @@ class ScreenCaptureService : Service() {
 
     /**
      * Сбрасывает состояние старой партии.
+     * Сам MediaProjection и Stockfish не останавливаются.
      */
     private fun resetGameState() {
 
@@ -755,6 +781,10 @@ class ScreenCaptureService : Service() {
 
         try {
             engineExecutor.execute {
+                // Если позиция уже успела измениться,
+                // не тратим время на устаревший анализ.
+                if (latestFen != fen) return@execute
+
                 analyzeWithStockfish(fen)
             }
         } catch (e: Exception) {
@@ -768,13 +798,17 @@ class ScreenCaptureService : Service() {
     }
 
     /**
-     * Анализ Stockfish.
+     * Анализ Stockfish с повторным использованием одного процесса.
      */
     private fun analyzeWithStockfish(fen: String) {
         try {
-            val result = StockfishEngine(applicationContext).use {
-                it.analyze(fen)
+            val engine = stockfishEngine ?: StockfishEngine(
+                applicationContext
+            ).also {
+                stockfishEngine = it
             }
+
+            val result = engine.analyze(fen)
 
             if (latestFen != fen) {
                 return
@@ -949,6 +983,14 @@ class ScreenCaptureService : Service() {
 
         processingExecutor.shutdownNow()
         engineExecutor.shutdownNow()
+
+        try {
+            stockfishEngine?.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        stockfishEngine = null
 
         try {
             recognizer?.close()
