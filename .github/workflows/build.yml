@@ -31,6 +31,36 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Download Stockfish 19 Android ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          URL="https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-android-arm64-universal.tar.gz"
+
+          curl -fL "$URL" -o /tmp/stockfish.tar.gz
+
+          mkdir -p /tmp/stockfish
+          tar -xzf /tmp/stockfish.tar.gz -C /tmp/stockfish
+
+          ENGINE="$(find /tmp/stockfish -type f -exec sh -c '
+            file "$1" | grep -q "ELF 64-bit.*ARM aarch64" && echo "$1"
+          ' _ {} \; | head -n 1)"
+
+          if [ -z "$ENGINE" ]; then
+            echo "Stockfish ARM64 executable not found"
+            find /tmp/stockfish -type f
+            exit 1
+          fi
+
+          mkdir -p app/src/main/assets/stockfish
+
+          cp "$ENGINE" app/src/main/assets/stockfish/stockfish
+
+          chmod 755 app/src/main/assets/stockfish/stockfish
+
+          file app/src/main/assets/stockfish/stockfish
+
       - name: Build debug APK
         run: gradle assembleDebug
 
