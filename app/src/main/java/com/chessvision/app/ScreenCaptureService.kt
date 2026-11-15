@@ -416,15 +416,18 @@ class ScreenCaptureService : Service() {
 
                 trackedPlayerColor =
                     outcome.playerColor ?: recognized.playerColor
+if (!wasStarted) {
+    gameStarted = true
 
-                if (!wasStarted) {
-                    gameStarted = true
-                    totalMoves = 0
-                    lastSubmittedFen = ""
-                    engineMessage = "Партия началась"
-                } else if (outcome.advanced) {
-                    totalMoves += outcome.movesDetected
-                }
+    // Учитываем также ходы, которые были сделаны
+    // до первого успешного распознавания доски.
+    totalMoves = outcome.movesDetected
+
+    lastSubmittedFen = ""
+    engineMessage = "Партия восстановлена. Проверяю очередь хода..."
+} else if (outcome.advanced) {
+    totalMoves += outcome.movesDetected
+}
 
                 // Проверяем, не наступила ли очередь игрока.
                 scheduleStockfishIfNeeded()
