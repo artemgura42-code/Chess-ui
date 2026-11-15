@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -29,6 +30,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -48,7 +50,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             ChessVisionApp(
                 onStartCapture = { resultCode, data ->
-                    val serviceIntent = Intent(
+                    val intent = Intent(
                         this,
                         ScreenCaptureService::class.java
                     ).apply {
@@ -63,9 +65,9 @@ class MainActivity : ComponentActivity() {
                     }
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(serviceIntent)
+                        startForegroundService(intent)
                     } else {
-                        startService(serviceIntent)
+                        startService(intent)
                     }
                 },
                 onStopCapture = {
@@ -86,6 +88,8 @@ fun ChessVisionApp(
     val context = androidx.compose.ui.platform.LocalContext.current
 
     var capturing by remember { mutableStateOf(false) }
+    var isDetecting by remember { mutableStateOf(false) }
+
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var detectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
@@ -93,29 +97,36 @@ fun ChessVisionApp(
         mutableStateOf<PieceRecognitionResult?>(null)
     }
 
-    var detectionMessage by remember {
+    var message by remember {
         mutableStateOf("Ожидание захвата экрана")
     }
 
-    var isDetecting by remember { mutableStateOf(false) }
+    // Игровые параметры FEN.
+    var sideToMove by remember { mutableStateOf("w") }
+
+    var whiteKingSide by remember { mutableStateOf(false) }
+    var whiteQueenSide by remember { mutableStateOf(false) }
+    var blackKingSide by remember { mutableStateOf(false) }
+    var blackQueenSide by remember { mutableStateOf(false) }
+
+    var enPassant by remember { mutableStateOf("-") }
+    var halfmoveClock by remember { mutableStateOf("0") }
+    var fullmoveNumber by remember { mutableStateOf("1") }
 
     val captureLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
+        ActivityResultContracts.StartActivityForResult()
     ) { result ->
 
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
             onStartCapture(result.resultCode, result.data)
             capturing = true
-            detectionMessage = "Захват запущен. Ищу шахматную доску..."
+            message = "Захват запущен. Ищу доску..."
         } else {
-            detectionMessage = "Разрешение на захват не получено"
+            message = "Не получено разрешение на захват экрана"
         }
     }
 
-    /*
-     * Автоматическое обнаружение доски.
-     * Распознавание запускается при появлении нового кадра.
-     */
+    // Автоматический поиск доски и распознавание новой позиции.
     LaunchedEffect(capturing) {
 
         if (!capturing) {
@@ -129,24 +140,22 @@ fun ChessVisionApp(
         try {
             while (isActive) {
 
-                val captureFile = java.io.File(
+                val file = java.io.File(
                     context.filesDir,
                     "last_screen_capture.png"
                 )
 
-                if (captureFile.exists() && captureFile.length() > 0) {
+                if (file.exists() && file.length() > 0) {
 
                     val signature =
-                        "${captureFile.lastModified()}_${captureFile.length()}"
+                        "${file.lastModified()}_${file.length()}"
 
                     if (signature != lastSignature) {
 
                         lastSignature = signature
 
                         val source = withContext(Dispatchers.IO) {
-                            BitmapFactory.decodeFile(
-                                captureFile.absolutePath
-                            )
+                            BitmapFactory.decodeFile(file.absolutePath)
                         }
 
                         if (source != null) {
@@ -165,7 +174,7 @@ fun ChessVisionApp(
 
                                     if (!ChessBoardDetector.initialize()) {
                                         throw IllegalStateException(
-                                            "Не удалось инициализировать OpenCV"
+                                            "Ошибка инициализации OpenCV"
                                         )
                                     }
 
@@ -210,7 +219,7 @@ fun ChessVisionApp(
                                         >(
                                             null,
                                             null,
-                                            "Некорректные координаты доски"
+                                            "Некорректные размеры доски"
                                         )
                                     }
 
@@ -222,27 +231,24 @@ fun ChessVisionApp(
                                         height
                                     )
 
-                                    val recognition =
+                                    val recognized =
                                         recognizer!!.recognize(crop)
 
                                     Triple(
                                         crop,
-                                        recognition,
-                                        "Доска найдена. Распознаны 64 клетки."
+                                        recognized,
+                                        "Позиция распознана"
                                     )
                                 }
 
                                 detectedBitmap = result.first
                                 recognitionResult = result.second
-                                detectionMessage = result.third
+                                message = result.third
 
                             } catch (e: Exception) {
-                                detectionMessage =
-                                    "Ошибка: ${e.message}"
-
+                                message = "Ошибка: ${e.message}"
                                 recognitionResult = null
                                 detectedBitmap = null
-
                             } finally {
                                 isDetecting = false
                             }
@@ -259,6 +265,36 @@ fun ChessVisionApp(
         }
     }
 
+    // Проверка игровых параметров.
+    val halfmove = halfmoveClock.toIntOrNull()
+    val fullmove = fullmoveNumber.toIntOrNull()
+
+    val validEnPassant =
+        enPassant == "-" ||
+        enPassant.matches(Regex("[a-h][36]"))
+
+    val validCounters =
+        halfmove != null &&
+        halfmove >= 0 &&
+        fullmove != null &&
+        fullmove >= 1
+
+    val castling = buildString {
+        if (whiteKingSide) append("K")
+        if (whiteQueenSide) append("Q")
+        if (blackKingSide) append("k")
+        if (blackQueenSide) append("q")
+    }.ifEmpty { "-" }
+
+    val finalFen = recognitionResult?.let { recognized ->
+        if (validEnPassant && validCounters) {
+            "${recognized.placement} $sideToMove $castling " +
+                "$enPassant $halfmove $fullmove"
+        } else {
+            null
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -268,34 +304,28 @@ fun ChessVisionApp(
     ) {
 
         Text(
-            text = "CHESS VISION",
+            "CHESS VISION",
             color = LimeColor,
             fontSize = 28.sp,
             fontWeight = FontWeight.Black
         )
 
         Text(
-            text = "Автоматическое распознавание шахматных позиций",
+            "Распознавание шахматных позиций",
             color = Color.LightGray,
             fontSize = 13.sp
         )
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(Modifier.height(22.dp))
 
-        Text(
-            text = "ЗАХВАТ ЭКРАНА",
-            color = LimeColor,
-            fontWeight = FontWeight.Bold
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
+        SectionTitle("ЗАХВАТ ЭКРАНА")
 
         Button(
             onClick = {
                 if (capturing) {
                     onStopCapture()
                     capturing = false
-                    detectionMessage = "Захват остановлен"
+                    message = "Захват остановлен"
                 } else {
                     val manager = context.getSystemService(
                         Context.MEDIA_PROJECTION_SERVICE
@@ -321,20 +351,17 @@ fun ChessVisionApp(
             )
         ) {
             Text(
-                text = if (capturing) {
-                    "ОСТАНОВИТЬ ЗАХВАТ"
-                } else {
-                    "НАЧАТЬ ЗАХВАТ ЭКРАНА"
-                },
+                if (capturing) "ОСТАНОВИТЬ ЗАХВАТ"
+                else "НАЧАТЬ ЗАХВАТ",
                 fontWeight = FontWeight.Bold
             )
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(Modifier.height(10.dp))
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
-                modifier = Modifier
+                Modifier
                     .size(9.dp)
                     .background(
                         if (capturing) LimeColor else Color.Gray,
@@ -342,114 +369,86 @@ fun ChessVisionApp(
                     )
             )
 
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(Modifier.width(8.dp))
 
             Text(
-                text = if (capturing) {
-                    "Захват активен"
-                } else {
-                    "Захват не запущен"
-                },
-                color = Color.LightGray,
-                fontSize = 13.sp
+                if (capturing) "Захват активен"
+                else "Захват не запущен",
+                color = Color.LightGray
             )
         }
 
-        Spacer(modifier = Modifier.height(22.dp))
+        Spacer(Modifier.height(22.dp))
 
-        Text(
-            text = "ПОСЛЕДНИЙ КАДР",
-            color = LimeColor,
-            fontWeight = FontWeight.Bold
-        )
+        SectionTitle("ПОСЛЕДНИЙ КАДР")
 
-        Spacer(modifier = Modifier.height(10.dp))
-
-        previewBitmap?.let { bitmap ->
+        previewBitmap?.let {
             Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = "Последний кадр экрана",
+                bitmap = it.asImageBitmap(),
+                contentDescription = "Кадр экрана",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(210.dp)
+                    .height(200.dp)
                     .background(Color.Black),
                 contentScale = ContentScale.Fit
             )
-        } ?: Text(
-            text = "Здесь появится изображение экрана",
-            color = Color.Gray
-        )
+        } ?: InfoText("Здесь появится изображение экрана")
 
-        Spacer(modifier = Modifier.height(22.dp))
+        Spacer(Modifier.height(22.dp))
 
-        Text(
-            text = "РАСПОЗНАВАНИЕ ДОСКИ",
-            color = LimeColor,
-            fontWeight = FontWeight.Bold
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
+        SectionTitle("АВТОМАТИЧЕСКОЕ РАСПОЗНАВАНИЕ")
 
         Row(verticalAlignment = Alignment.CenterVertically) {
-
             if (isDetecting) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(18.dp),
                     color = LimeColor,
                     strokeWidth = 2.dp
                 )
-
-                Spacer(modifier = Modifier.width(10.dp))
+                Spacer(Modifier.width(10.dp))
             }
 
             Text(
-                text = detectionMessage,
+                message,
                 color = Color.LightGray,
                 fontSize = 13.sp
             )
         }
 
-        detectedBitmap?.let { bitmap ->
+        detectedBitmap?.let {
+            Spacer(Modifier.height(14.dp))
 
-            Spacer(modifier = Modifier.height(14.dp))
-
-            Text(
-                text = "НАЙДЕННАЯ ДОСКА",
-                color = LimeColor,
-                fontWeight = FontWeight.Bold
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
+            SectionTitle("ОБНАРУЖЕННАЯ ДОСКА")
 
             Box(
-                modifier = Modifier
+                Modifier
                     .fillMaxWidth()
                     .aspectRatio(1f)
             ) {
                 Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "Обнаруженная шахматная доска",
+                    bitmap = it.asImageBitmap(),
+                    contentDescription = "Шахматная доска",
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.FillBounds
                 )
 
-                Canvas(modifier = Modifier.fillMaxSize()) {
+                Canvas(Modifier.fillMaxSize()) {
                     for (i in 1..7) {
                         val x = size.width * i / 8f
                         val y = size.height * i / 8f
 
                         drawLine(
-                            color = Color.White.copy(alpha = 0.75f),
-                            start = Offset(x, 0f),
-                            end = Offset(x, size.height),
-                            strokeWidth = 1.dp.toPx()
+                            Color.White.copy(alpha = 0.8f),
+                            Offset(x, 0f),
+                            Offset(x, size.height),
+                            1.dp.toPx()
                         )
 
                         drawLine(
-                            color = Color.White.copy(alpha = 0.75f),
-                            start = Offset(0f, y),
-                            end = Offset(size.width, y),
-                            strokeWidth = 1.dp.toPx()
+                            Color.White.copy(alpha = 0.8f),
+                            Offset(0f, y),
+                            Offset(size.width, y),
+                            1.dp.toPx()
                         )
                     }
                 }
@@ -458,29 +457,180 @@ fun ChessVisionApp(
 
         recognitionResult?.let { result ->
 
-            Spacer(modifier = Modifier.height(22.dp))
+            Spacer(Modifier.height(22.dp))
+
+            SectionTitle("РАСПОЗНАННАЯ ПОЗИЦИЯ")
+
+            RecognizedBoard(result.placement)
+
+            Spacer(Modifier.height(12.dp))
 
             Text(
-                text = "РАСПОЗНАННЫЕ ФИГУРЫ — 8×8",
-                color = LimeColor,
+                "Средняя уверенность: ${
+                    String.format("%.1f", result.meanConfidence * 100)
+                }%",
+                color = Color.LightGray
+            )
+
+            Text(
+                "Минимальная уверенность: ${
+                    String.format("%.1f", result.minConfidence * 100)
+                }%",
+                color = Color.LightGray
+            )
+
+            Text(
+                if (result.reliable) {
+                    "Уверенность распознавания высокая"
+                } else {
+                    "Внимание: есть клетки с низкой уверенностью"
+                },
+                color = if (result.reliable) LimeColor
+                else Color(0xFFFFB45C),
+                fontSize = 13.sp
+            )
+
+            Spacer(Modifier.height(24.dp))
+
+            SectionTitle("ПАРАМЕТРЫ ПОЗИЦИИ FEN")
+
+            Text(
+                "Чей сейчас ход?",
+                color = Color.White,
                 fontWeight = FontWeight.Bold
             )
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(
+                    selected = sideToMove == "w",
+                    onClick = { sideToMove = "w" },
+                    colors = RadioButtonDefaults.colors(
+                        selectedColor = LimeColor
+                    )
+                )
+                Text("Белые", color = Color.White)
 
-            RecognizedBoard(
-                placement = result.placement
-            )
+                Spacer(Modifier.width(20.dp))
 
-            Spacer(modifier = Modifier.height(18.dp))
+                RadioButton(
+                    selected = sideToMove == "b",
+                    onClick = { sideToMove = "b" },
+                    colors = RadioButtonDefaults.colors(
+                        selectedColor = LimeColor
+                    )
+                )
+                Text("Чёрные", color = Color.White)
+            }
+
+            Spacer(Modifier.height(12.dp))
 
             Text(
-                text = "FEN",
-                color = LimeColor,
+                "Права рокировки",
+                color = Color.White,
                 fontWeight = FontWeight.Bold
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Отметь только те права, которые сохранились в партии.",
+                color = Color.Gray,
+                fontSize = 12.sp
+            )
+
+            CastlingCheckbox(
+                "Белые: короткая (K)",
+                whiteKingSide
+            ) { whiteKingSide = it }
+
+            CastlingCheckbox(
+                "Белые: длинная (Q)",
+                whiteQueenSide
+            ) { whiteQueenSide = it }
+
+            CastlingCheckbox(
+                "Чёрные: короткая (k)",
+                blackKingSide
+            ) { blackKingSide = it }
+
+            CastlingCheckbox(
+                "Чёрные: длинная (q)",
+                blackQueenSide
+            ) { blackQueenSide = it }
+
+            Spacer(Modifier.height(12.dp))
+
+            Text(
+                "Взятие на проходе",
+                color = Color.White,
+                fontWeight = FontWeight.Bold
+            )
+
+            OutlinedTextField(
+                value = enPassant,
+                onValueChange = {
+                    enPassant = it.lowercase().take(2)
+                },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                placeholder = { Text("- или, например, e3") },
+                isError = !validEnPassant,
+                colors = fenFieldColors()
+            )
+
+            if (!validEnPassant) {
+                InfoText("Допустимы '-' или клетка e3/e6.")
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            Text(
+                "Счётчик полуходов",
+                color = Color.White,
+                fontWeight = FontWeight.Bold
+            )
+
+            OutlinedTextField(
+                value = halfmoveClock,
+                onValueChange = {
+                    halfmoveClock = it.filter(Char::isDigit).take(6)
+                },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number
+                ),
+                colors = fenFieldColors()
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            Text(
+                "Номер полного хода",
+                color = Color.White,
+                fontWeight = FontWeight.Bold
+            )
+
+            OutlinedTextField(
+                value = fullmoveNumber,
+                onValueChange = {
+                    fullmoveNumber = it.filter(Char::isDigit).take(6)
+                },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number
+                ),
+                colors = fenFieldColors()
+            )
+
+            if (!validCounters) {
+                InfoText(
+                    "Полуходы должны быть неотрицательными, номер хода — от 1."
+                )
+            }
+
+            Spacer(Modifier.height(22.dp))
+
+            SectionTitle("ПОЛНАЯ FEN-ЗАПИСЬ")
 
             Surface(
                 color = PanelBackground,
@@ -488,59 +638,104 @@ fun ChessVisionApp(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    text = result.fen,
-                    color = Color.White,
-                    fontSize = 13.sp,
-                    modifier = Modifier.padding(12.dp)
+                    text = finalFen ?: "Проверь игровые параметры",
+                    color = if (finalFen != null) LimeColor
+                    else Color(0xFFFFB45C),
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(14.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
 
-            Text(
-                text = "Средняя уверенность: ${
-                    String.format("%.1f", result.meanConfidence * 100)
-                }%",
-                color = Color.LightGray,
-                fontSize = 13.sp
-            )
+            Button(
+                onClick = {
+                    finalFen?.let {
+                        val clipboard =
+                            context.getSystemService(
+                                Context.CLIPBOARD_SERVICE
+                            ) as android.content.ClipboardManager
 
-            Text(
-                text = "Минимальная уверенность: ${
-                    String.format("%.1f", result.minConfidence * 100)
-                }%",
-                color = Color.LightGray,
-                fontSize = 13.sp
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = if (result.reliable) {
-                    "Распознавание прошло проверку уверенности."
-                } else {
-                    "Низкая уверенность: возможны ошибки распознавания."
+                        clipboard.setPrimaryClip(
+                            android.content.ClipData.newPlainText(
+                                "Chess FEN",
+                                it
+                            )
+                        )
+                    }
                 },
-                color = if (result.reliable) {
-                    LimeColor
-                } else {
-                    Color(0xFFFFB45C)
-                },
-                fontSize = 13.sp
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Text(
-                text = "Права рокировки и остальные игровые поля FEN пока предполагаются автоматически.",
-                color = Color.Gray,
-                fontSize = 11.sp
-            )
+                enabled = finalFen != null,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = LimeColor,
+                    contentColor = Color.Black
+                )
+            ) {
+                Text(
+                    "КОПИРОВАТЬ FEN",
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
-        Spacer(modifier = Modifier.height(30.dp))
+        Spacer(Modifier.height(30.dp))
     }
 }
+
+@Composable
+private fun SectionTitle(text: String) {
+    Text(
+        text = text,
+        color = LimeColor,
+        fontWeight = FontWeight.Bold,
+        fontSize = 14.sp
+    )
+}
+
+@Composable
+private fun InfoText(text: String) {
+    Text(
+        text = text,
+        color = Color.Gray,
+        fontSize = 12.sp
+    )
+}
+
+@Composable
+private fun CastlingCheckbox(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = CheckboxDefaults.colors(
+                checkedColor = LimeColor,
+                checkmarkColor = Color.Black
+            )
+        )
+
+        Text(
+            label,
+            color = Color.White,
+            fontSize = 14.sp
+        )
+    }
+}
+
+@Composable
+private fun fenFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedTextColor = Color.White,
+    unfocusedTextColor = Color.White,
+    focusedBorderColor = LimeColor,
+    unfocusedBorderColor = Color.Gray,
+    cursorColor = LimeColor,
+    focusedLabelColor = LimeColor
+)
 
 @Composable
 fun RecognizedBoard(placement: String) {
@@ -589,18 +784,15 @@ fun RecognizedBoard(placement: String) {
                 (0 until 8).forEach { columnIndex ->
 
                     val piece = cells.getOrElse(columnIndex) { '.' }
-                    val isLight = (rowIndex + columnIndex) % 2 == 0
+                    val light = (rowIndex + columnIndex) % 2 == 0
 
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight()
                             .background(
-                                if (isLight) {
-                                    Color(0xFFEEEED2)
-                                } else {
-                                    Color(0xFF769656)
-                                }
+                                if (light) Color(0xFFEEEED2)
+                                else Color(0xFF769656)
                             ),
                         contentAlignment = Alignment.Center
                     ) {
