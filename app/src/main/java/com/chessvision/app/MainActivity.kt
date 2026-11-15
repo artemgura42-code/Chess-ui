@@ -6,21 +6,30 @@ import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.graphics.BitmapFactory
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import java.io.File
 
 private val Background = Color(0xFF090D0B)
 private val Panel = Color(0xFF151D18)
@@ -75,7 +84,11 @@ fun ChessVisionApp(
         mutableStateOf("Захват экрана пока не запущен.")
     }
 
-    val context = androidx.compose.ui.platform.LocalContext.current
+    var previewBitmap by remember {
+        mutableStateOf<android.graphics.Bitmap?>(null)
+    }
+
+    val context = LocalContext.current
 
     val captureLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -88,6 +101,26 @@ fun ChessVisionApp(
             message = "Захват экрана активен."
         } else {
             message = "Разрешение на захват не предоставлено."
+        }
+    }
+
+    // Автоматически загружаем последний кадр
+    LaunchedEffect(capturing) {
+        while (capturing) {
+            val file = File(
+                context.filesDir,
+                "last_screen_capture.png"
+            )
+
+            if (file.exists() && file.length() > 0) {
+                val bitmap = BitmapFactory.decodeFile(file.absolutePath)
+
+                if (bitmap != null) {
+                    previewBitmap = bitmap
+                }
+            }
+
+            delay(1000)
         }
     }
 
@@ -105,8 +138,10 @@ fun ChessVisionApp(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Background)
+                .verticalScroll(rememberScrollState())
                 .padding(22.dp)
         ) {
+
             Text(
                 "CHESS VISION",
                 color = Lime,
@@ -115,7 +150,7 @@ fun ChessVisionApp(
                 letterSpacing = 3.sp
             )
 
-            Spacer(Modifier.height(35.dp))
+            Spacer(Modifier.height(30.dp))
 
             Text(
                 "Захват экрана",
@@ -132,7 +167,7 @@ fun ChessVisionApp(
                 fontSize = 15.sp
             )
 
-            Spacer(Modifier.height(28.dp))
+            Spacer(Modifier.height(25.dp))
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -155,7 +190,8 @@ fun ChessVisionApp(
                     Spacer(Modifier.height(15.dp))
 
                     Text(
-                        if (capturing) "Захват активен" else "Ожидание запуска",
+                        if (capturing) "Захват активен"
+                        else "Ожидание запуска",
                         color = Color.White,
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold
@@ -206,15 +242,74 @@ fun ChessVisionApp(
                         enabled = capturing,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Остановить захват")
+                        Text(
+                            "Остановить захват",
+                            color = Lime
+                        )
                     }
                 }
             }
 
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(25.dp))
 
             Text(
-                "КАК ЭТО РАБОТАЕТ",
+                "ПОСЛЕДНИЙ КАДР",
+                color = Lime,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.5.sp
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = Panel
+                )
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(280.dp)
+                        .padding(10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val bitmap = previewBitmap
+
+                    if (bitmap != null) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "Последний захваченный кадр",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit
+                        )
+                    } else {
+                        Text(
+                            if (capturing)
+                                "Ожидание первого изображения..."
+                            else
+                                "Запусти захват, чтобы увидеть изображение",
+                            color = Muted,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            Text(
+                "Изображение обновляется автоматически во время захвата.",
+                color = Muted,
+                fontSize = 12.sp
+            )
+
+            Spacer(Modifier.height(28.dp))
+
+            Text(
+                "СЛЕДУЮЩИЕ ЭТАПЫ",
                 color = Muted,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
@@ -223,27 +318,51 @@ fun ChessVisionApp(
 
             Spacer(Modifier.height(12.dp))
 
-            InfoItem("01", "Разрешение Android", "Ты подтверждаешь системный запрос.")
-            InfoItem("02", "Захват изображения", "Приложение получает кадры экрана.")
-            InfoItem("03", "Сохранение кадра", "Последний кадр хранится внутри приложения.")
+            InfoItem(
+                "01",
+                "Получение изображения",
+                "Захват кадров экрана телефона."
+            )
 
-            Spacer(Modifier.weight(1f))
+            InfoItem(
+                "02",
+                "Распознавание доски",
+                "Определение границ шахматной доски."
+            )
+
+            InfoItem(
+                "03",
+                "Распознавание фигур",
+                "Определение расположения фигур."
+            )
+
+            InfoItem(
+                "04",
+                "Шахматный анализ",
+                "Подготовка позиции для Stockfish 10."
+            )
+
+            Spacer(Modifier.height(20.dp))
 
             Text(
-                "Захват можно остановить в любой момент.",
+                "CHESS VISION",
                 color = Muted,
-                fontSize = 12.sp
+                fontSize = 11.sp
             )
         }
     }
 }
 
 @Composable
-fun InfoItem(number: String, title: String, description: String) {
+fun InfoItem(
+    number: String,
+    title: String,
+    description: String
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp),
+            .padding(vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -256,8 +375,17 @@ fun InfoItem(number: String, title: String, description: String) {
         Spacer(Modifier.width(14.dp))
 
         Column {
-            Text(title, color = Color.White, fontWeight = FontWeight.Bold)
-            Text(description, color = Muted, fontSize = 12.sp)
+            Text(
+                title,
+                color = Color.White,
+                fontWeight = FontWeight.Bold
+            )
+
+            Text(
+                description,
+                color = Muted,
+                fontSize = 12.sp
+            )
         }
     }
 }
