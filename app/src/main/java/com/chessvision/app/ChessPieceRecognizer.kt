@@ -7,9 +7,8 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import java.io.Closeable
-import java.lang.reflect.Array as ReflectArray
 import java.nio.FloatBuffer
-import kotlin.math.exp
+import kotlin.math.abs
 
 data class PieceRecognitionResult(
     val placement: String,
@@ -24,20 +23,15 @@ class ChessPieceRecognizer(context: Context) : Closeable {
 
     companion object {
         private const val MODEL_NAME = "chess-tiles-v2.onnx"
-
-        private val LABELS = charArrayOf(
-            '.', 'K', 'Q', 'R', 'B', 'N', 'P',
-            'k', 'q', 'r', 'b', 'n', 'p'
-        )
-
         private const val CONFIDENCE_LIMIT = 0.70f
+
+        // Точный порядок классов из Fenshot.
+        // 1 = пустая клетка.
+        private const val LABELS = "1KQRBNPkqrbnp"
     }
 
     private val environment = OrtEnvironment.getEnvironment()
-
     private val session: OrtSession
-
-    private val inputName: String
 
     init {
         val modelBytes = context.applicationContext.assets
@@ -52,14 +46,20 @@ class ChessPieceRecognizer(context: Context) : Closeable {
             options.close()
         }
 
-        inputName = session.inputNames.first()
+        require(session.inputNames.contains("tiles")) {
+            "В модели отсутствует вход tiles"
+        }
+
+        require(session.outputNames.contains("probs")) {
+            "В модели отсутствует выход probs"
+        }
     }
 
     @Synchronized
     fun recognize(boardBitmap: Bitmap): PieceRecognitionResult {
 
         require(!boardBitmap.isRecycled) {
-            "Изображение доски уже освобождено"
+            "Изображение доски освобождено"
         }
 
         val resized = Bitmap.createScaledBitmap(
@@ -70,10 +70,10 @@ class ChessPieceRecognizer(context: Context) : Closeable {
         )
 
         try {
+            // Формат модели: [64, 1024].
+            // Клетки идут от A1 до H8.
+            // Каждая клетка — 32x32 пикселя.
             val input = FloatArray(64 * 1024)
-
-            // Порядок клеток: A1, B1 ... H1, A2 ... H8.
-            // Белые фигуры находятся снизу.
 
             for (rank in 0 until 8) {
                 for (file in 0 until 8) {
@@ -93,16 +93,19 @@ class ChessPieceRecognizer(context: Context) : Closeable {
                                 startY + y
                             )
 
-                            val red = (color shr 16) and 0xFF
-                            val green = (color shr 8) and 0xFF
-                            val blue = color and 0xFF
+                            val red = (color shr 16) and 255
+                            val green = (color shr 8) and 255
+                            val blue = color and 255
 
-                            val gray =
-                                (0.299f * red +
-                                 0.587f * green +
-                                 0.114f * blue) / 255f
+                            val gray = (
+                                0.299f * red +
+                                0.587f * green +
+                                0.114f * blue
+                            ) / 255f
 
-                            input[tileIndex * 1024 + pixelIndex] = gray
+                            input[
+                                tileIndex * 1024 + pixelIndex
+                            ] = gray
 
                             pixelIndex++
                         }
@@ -117,84 +120,101 @@ class ChessPieceRecognizer(context: Context) : Closeable {
             )
 
             try {
-                val output = session.run(
-                    mapOf(inputName to tensor)
+                val results = session.run(
+                    mapOf("tiles" to tensor)
                 )
 
                 try {
-                    val raw = flatten(output[0].value)
+                    val outputTensor =
+                        results.get("probs").orElseThrow {
+                            IllegalStateException(
+                                "Модель не вернула probs"
+                            )
+                        } as OnnxTensor
 
-                    require(raw.size == 64 * 13) {
-                        "Неожиданный размер результата модели: ${raw.size}"
+                    val probabilities =
+                        outputTensor.floatBuffer
+
+                    require(probabilities.remaining() == 64 * 13) {
+                        "Неверный размер выхода модели"
                     }
 
-                    val board = Array(8) { CharArray(8) { '.' } }
+                    val board = Array(8) {
+                        CharArray(8) { '.' }
+                    }
+
                     val confidences = mutableListOf<Float>()
                     val squareResults = mutableListOf<String>()
 
                     for (rank in 0 until 8) {
                         for (file in 0 until 8) {
 
-                            val index = rank * 8 + file
-                            val offset = index * 13
-
-                            val values = raw.subList(
-                                offset,
-                                offset + 13
-                            )
-
-                            val probabilities = probabilities(values)
+                            val tileIndex = rank * 8 + file
 
                             var bestClass = 0
+                            var bestProbability = -1f
 
-                            for (i in 1 until 13) {
-                                if (probabilities[i] >
-                                    probabilities[bestClass]) {
-                                    bestClass = i
+                            for (classIndex in 0 until 13) {
+
+                                val probability =
+                                    probabilities.get(
+                                        tileIndex * 13 + classIndex
+                                    )
+
+                                if (probability > bestProbability) {
+                                    bestProbability = probability
+                                    bestClass = classIndex
                                 }
                             }
 
-                            val piece = LABELS[bestClass]
+                            val label = LABELS[bestClass]
 
-                            // rank 0 соответствует нижнему ряду.
-                            board[7 - rank][file] = piece
+                            val piece = if (label == '1') {
+                                '.'
+                            } else {
+                                label
+                            }
 
-                            val confidence = probabilities[bestClass]
+                            board[rank][file] = piece
+
+                            val confidence =
+                                bestProbability.coerceIn(0f, 1f)
+
                             confidences.add(confidence)
 
                             val squareName =
                                 "${'a' + file}${rank + 1}"
 
                             squareResults.add(
-                                "$squareName: $piece (${String.format("%.2f", confidence)})"
+                                "$squareName: $piece " +
+                                "(${String.format("%.2f", confidence)})"
                             )
                         }
                     }
 
                     val placement = buildPlacement(board)
-                    val mean = confidences.average().toFloat()
-                    val minimum = confidences.minOrNull() ?: 0f
+
+                    val meanConfidence =
+                        confidences.average().toFloat()
+
+                    val minConfidence =
+                        confidences.minOrNull() ?: 0f
 
                     val castling = inferCastling(board)
 
-                    val fen = buildString {
-                        append(placement)
-                        append(" w ")
-                        append(castling)
-                        append(" - 0 1")
-                    }
+                    val fen = "$placement w $castling - 0 1"
 
                     return PieceRecognitionResult(
                         placement = placement,
                         fen = fen,
-                        meanConfidence = mean,
-                        minConfidence = minimum,
-                        reliable = minimum >= CONFIDENCE_LIMIT,
+                        meanConfidence = meanConfidence,
+                        minConfidence = minConfidence,
+                        reliable = minConfidence >= CONFIDENCE_LIMIT,
                         squares = squareResults
                     )
 
                 } finally {
-                    output.close()
+                    results.close()
                 }
 
             } finally {
@@ -208,72 +228,16 @@ class ChessPieceRecognizer(context: Context) : Closeable {
         }
     }
 
-    private fun probabilities(values: List<Float>): FloatArray {
+    private fun buildPlacement(
+        board: Array<CharArray>
+    ): String {
 
-        val sum = values.sum()
-
-        // Если модель уже вернула вероятности,
-        // сохраняем их без повторной нормализации.
-
-        if (values.all { it >= 0f && it <= 1f } &&
-            kotlin.math.abs(sum - 1f) < 0.01f) {
-            return values.toFloatArray()
-        }
-
-        // Иначе преобразуем выходные значения через softmax.
-
-        val maxValue = values.maxOrNull() ?: 0f
-
-        val exponents = values.map {
-            exp((it - maxValue).coerceIn(-80f, 0f))
-        }
-
-        val total = exponents.sum()
-
-        return FloatArray(13) { i ->
-            exponents[i] / total
-        }
-    }
-
-    private fun flatten(value: Any): List<Float> {
-
-        val result = mutableListOf<Float>()
-
-        fun visit(item: Any?) {
-            if (item == null) return
-
-            if (item is Number) {
-                result.add(item.toFloat())
-                return
-            }
-
-            if (item.javaClass.isArray) {
-                val length = ReflectArray.getLength(item)
-
-                for (i in 0 until length) {
-                    visit(ReflectArray.get(item, i))
-                }
-
-                return
-            }
-
-            throw IllegalArgumentException(
-                "Неизвестный тип выхода ONNX: ${item.javaClass.name}"
-            )
-        }
-
-        visit(value)
-        return result
-    }
-
-    private fun buildPlacement(board: Array<CharArray>): String {
-
-        return (0 until 8).joinToString("/") { row ->
+        return (7 downTo 0).joinToString("/") { rank ->
 
             val result = StringBuilder()
             var empty = 0
 
-            for (piece in board[row]) {
+            for (piece in board[rank]) {
 
                 if (piece == '.') {
                     empty++
@@ -295,7 +259,9 @@ class ChessPieceRecognizer(context: Context) : Closeable {
         }
     }
 
-    private fun inferCastling(board: Array<CharArray>): String {
+    private fun inferCastling(
+        board: Array<CharArray>
+    ): String {
 
         val rights = StringBuilder()
 
