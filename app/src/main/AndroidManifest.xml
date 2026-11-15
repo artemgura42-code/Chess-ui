@@ -1,9 +1,15 @@
 
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Работа фонового сервиса -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <!-- Системное уведомление активного захвата -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Отображение плавающей панели поверх Lichess -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="true"
@@ -28,4 +34,5 @@
             android:foregroundServiceType="mediaProjection" />
 
     </application>
+
 </manifest>
