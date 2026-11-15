@@ -8,7 +8,6 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import java.io.Closeable
 import java.nio.FloatBuffer
-import kotlin.math.abs
 
 data class PieceRecognitionResult(
     val placement: String,
@@ -24,9 +23,6 @@ class ChessPieceRecognizer(context: Context) : Closeable {
     companion object {
         private const val MODEL_NAME = "chess-tiles-v2.onnx"
         private const val CONFIDENCE_LIMIT = 0.70f
-
-        // Точный порядок классов из Fenshot.
-        // 1 = пустая клетка.
         private const val LABELS = "1KQRBNPkqrbnp"
     }
 
@@ -70,16 +66,14 @@ class ChessPieceRecognizer(context: Context) : Closeable {
         )
 
         try {
-            // Формат модели: [64, 1024].
-            // Клетки идут от A1 до H8.
-            // Каждая клетка — 32x32 пикселя.
             val input = FloatArray(64 * 1024)
 
+            // Подготовка 64 клеток размером 32×32.
+            // Белые фигуры находятся снизу.
             for (rank in 0 until 8) {
                 for (file in 0 until 8) {
 
                     val tileIndex = rank * 8 + file
-
                     val startX = file * 32
                     val startY = (7 - rank) * 32
 
@@ -103,10 +97,7 @@ class ChessPieceRecognizer(context: Context) : Closeable {
                                 0.114f * blue
                             ) / 255f
 
-                            input[
-                                tileIndex * 1024 + pixelIndex
-                            ] = gray
-
+                            input[tileIndex * 1024 + pixelIndex] = gray
                             pixelIndex++
                         }
                     }
@@ -125,15 +116,15 @@ class ChessPieceRecognizer(context: Context) : Closeable {
                 )
 
                 try {
-                    val outputTensor =
-                        results.get("probs").orElseThrow {
+                    val outputTensor = results
+                        .get("probs")
+                        .orElseThrow {
                             IllegalStateException(
                                 "Модель не вернула probs"
                             )
                         } as OnnxTensor
 
-                    val probabilities =
-                        outputTensor.floatBuffer
+                    val probabilities = outputTensor.floatBuffer
 
                     require(probabilities.remaining() == 64 * 13) {
                         "Неверный размер выхода модели"
@@ -156,10 +147,9 @@ class ChessPieceRecognizer(context: Context) : Closeable {
 
                             for (classIndex in 0 until 13) {
 
-                                val probability =
-                                    probabilities.get(
-                                        tileIndex * 13 + classIndex
-                                    )
+                                val probability = probabilities.get(
+                                    tileIndex * 13 + classIndex
+                                )
 
                                 if (probability > bestProbability) {
                                     bestProbability = probability
@@ -187,7 +177,7 @@ class ChessPieceRecognizer(context: Context) : Closeable {
 
                             squareResults.add(
                                 "$squareName: $piece " +
-                                "(${String.format("%.2f", confidence)})"
+                                    "(${String.format("%.2f", confidence)})"
                             )
                         }
                     }
