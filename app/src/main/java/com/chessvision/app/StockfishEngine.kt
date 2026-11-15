@@ -7,6 +7,7 @@ import java.io.BufferedWriter
 import java.io.Closeable
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.io.File
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -28,27 +29,37 @@ class StockfishEngine(
     private fun startEngine() {
         if (process?.isAlive == true) return
 
-        val directory = java.io.File(context.filesDir, "stockfish")
-        directory.mkdirs()
-
-        val engineFile = java.io.File(directory, "stockfish")
+        val engineFile = File(
+            context.applicationInfo.nativeLibraryDir,
+            "libstockfish.so"
+        )
 
         if (!engineFile.exists()) {
-            context.assets.open("stockfish/stockfish").use { input ->
-                engineFile.outputStream().use { destination ->
-                    input.copyTo(destination)
-                }
-            }
+            throw IllegalStateException(
+                "Stockfish не найден: ${engineFile.absolutePath}"
+            )
         }
 
-        if (!engineFile.setExecutable(true)) {
-            throw IllegalStateException("Не удалось запустить Stockfish")
+        if (!engineFile.canExecute()) {
+            throw IllegalStateException(
+                "Нет разрешения на запуск Stockfish: " +
+                    engineFile.absolutePath
+            )
         }
 
-        val started = ProcessBuilder(engineFile.absolutePath)
-            .directory(directory)
-            .redirectErrorStream(true)
-            .start()
+        output.clear()
+
+        val started = try {
+            ProcessBuilder(engineFile.absolutePath)
+                .directory(engineFile.parentFile)
+                .redirectErrorStream(true)
+                .start()
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "Не удалось запустить ARM64 Stockfish: ${e.message}",
+                e
+            )
+        }
 
         process = started
 
@@ -70,6 +81,7 @@ class StockfishEngine(
             }
         }.apply {
             isDaemon = true
+            name = "StockfishOutput"
             start()
         }
 
@@ -88,7 +100,9 @@ class StockfishEngine(
             write(command)
             newLine()
             flush()
-        } ?: throw IllegalStateException("Движок не запущен")
+        } ?: throw IllegalStateException(
+            "Движок не запущен"
+        )
     }
 
     private fun waitFor(
@@ -99,7 +113,8 @@ class StockfishEngine(
             timeoutSeconds * 1000
 
         while (System.currentTimeMillis() < deadline) {
-            val line = output.poll(1, TimeUnit.SECONDS) ?: continue
+            val line = output.poll(1, TimeUnit.SECONDS)
+                ?: continue
 
             if (line.trim() == expected) return
         }
@@ -131,7 +146,8 @@ class StockfishEngine(
 
         while (System.currentTimeMillis() < deadline) {
 
-            val line = output.poll(2, TimeUnit.SECONDS) ?: continue
+            val line = output.poll(2, TimeUnit.SECONDS)
+                ?: continue
 
             if (line.startsWith("info ")) {
 
@@ -154,6 +170,7 @@ class StockfishEngine(
                         "Мат в $value"
                     } else {
                         val pawns = value / 100.0
+
                         "%+.2f".format(
                             java.util.Locale.US,
                             pawns
@@ -176,7 +193,9 @@ class StockfishEngine(
             )
 
         if (move == "(none)" || move == "0000") {
-            throw IllegalStateException("Нет доступных ходов")
+            throw IllegalStateException(
+                "Нет доступных ходов"
+            )
         }
 
         return StockfishResult(
