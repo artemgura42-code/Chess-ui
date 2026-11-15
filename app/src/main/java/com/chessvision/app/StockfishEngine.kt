@@ -28,8 +28,8 @@ class StockfishEngine(
     private val output = LinkedBlockingQueue<String>()
 
     companion object {
-        private const val SEARCH_TIME_MS = 1300L
-        private const val SEARCH_TIMEOUT_MS = 6000L
+        private const val SEARCH_DEPTH = 12
+        private const val SEARCH_TIMEOUT_MS = 30000L
     }
 
     private fun startEngine() {
@@ -98,7 +98,6 @@ class StockfishEngine(
 
         send("setoption name Threads value 2")
         send("setoption name Hash value 64")
-        send("setoption name Move Overhead value 50")
         send("isready")
 
         waitFor("readyok", 30)
@@ -145,7 +144,7 @@ class StockfishEngine(
         output.clear()
 
         send("position fen $fen")
-        send("go movetime $SEARCH_TIME_MS")
+        send("go depth $SEARCH_DEPTH")
 
         var bestMove: String? = null
         var evaluation = "Оценка недоступна"
@@ -156,7 +155,7 @@ class StockfishEngine(
 
         while (System.currentTimeMillis() < deadline) {
 
-            val line = output.poll(250, TimeUnit.MILLISECONDS)
+            val line = output.poll(1, TimeUnit.SECONDS)
                 ?: continue
 
             if (line.startsWith("info ")) {
