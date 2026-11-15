@@ -1,285 +1,623 @@
 
-
 package com.chessvision.app
 
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
-import java.io.Closeable
-import java.nio.FloatBuffer
-import kotlin.math.abs
+import android.graphics.BitmapFactory
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 
-data class PieceRecognitionResult(
-    val placement: String,
-    val fen: String,
-    val meanConfidence: Float,
-    val minConfidence: Float,
-    val reliable: Boolean,
-    val squares: List<String>
-)
+private val DarkBackground = Color(0xFF101510)
+private val PanelBackground = Color(0xFF1B241C)
+private val LimeColor = Color(0xFFB7F36B)
 
-class ChessPieceRecognizer(context: Context) : Closeable {
+class MainActivity : ComponentActivity() {
 
-    companion object {
-        private const val MODEL_NAME = "chess-tiles-v2.onnx"
-        private const val CONFIDENCE_LIMIT = 0.70f
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
 
-        // Точный порядок классов из Fenshot.
-        // 1 = пустая клетка.
-        private const val LABELS = "1KQRBNPkqrbnp"
+        setContent {
+            ChessVisionApp(
+                onStartCapture = { resultCode, data ->
+                    val serviceIntent = Intent(
+                        this,
+                        ScreenCaptureService::class.java
+                    ).apply {
+                        putExtra(
+                            ScreenCaptureService.EXTRA_RESULT_CODE,
+                            resultCode
+                        )
+                        putExtra(
+                            ScreenCaptureService.EXTRA_DATA,
+                            data
+                        )
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(serviceIntent)
+                    } else {
+                        startService(serviceIntent)
+                    }
+                },
+                onStopCapture = {
+                    stopService(
+                        Intent(this, ScreenCaptureService::class.java)
+                    )
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun ChessVisionApp(
+    onStartCapture: (Int, Intent?) -> Unit,
+    onStopCapture: () -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    var capturing by remember { mutableStateOf(false) }
+    var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var detectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    var recognitionResult by remember {
+        mutableStateOf<PieceRecognitionResult?>(null)
     }
 
-    private val environment = OrtEnvironment.getEnvironment()
-    private val session: OrtSession
+    var detectionMessage by remember {
+        mutableStateOf("Ожидание захвата экрана")
+    }
 
-    init {
-        val modelBytes = context.applicationContext.assets
-            .open(MODEL_NAME)
-            .use { it.readBytes() }
+    var isDetecting by remember { mutableStateOf(false) }
 
-        val options = OrtSession.SessionOptions()
+    val captureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
 
-        session = try {
-            environment.createSession(modelBytes, options)
-        } finally {
-            options.close()
-        }
-
-        require(session.inputNames.contains("tiles")) {
-            "В модели отсутствует вход tiles"
-        }
-
-        require(session.outputNames.contains("probs")) {
-            "В модели отсутствует выход probs"
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            onStartCapture(result.resultCode, result.data)
+            capturing = true
+            detectionMessage = "Захват запущен. Ищу шахматную доску..."
+        } else {
+            detectionMessage = "Разрешение на захват не получено"
         }
     }
 
-    @Synchronized
-    fun recognize(boardBitmap: Bitmap): PieceRecognitionResult {
+    /*
+     * Автоматическое обнаружение доски.
+     * Распознавание запускается при появлении нового кадра.
+     */
+    LaunchedEffect(capturing) {
 
-        require(!boardBitmap.isRecycled) {
-            "Изображение доски освобождено"
+        if (!capturing) {
+            isDetecting = false
+            return@LaunchedEffect
         }
 
-        val resized = Bitmap.createScaledBitmap(
-            boardBitmap,
-            256,
-            256,
-            true
-        )
+        var lastSignature = ""
+        var recognizer: ChessPieceRecognizer? = null
 
         try {
-            // Формат модели: [64, 1024].
-            // Клетки идут от A1 до H8.
-            // Каждая клетка — 32x32 пикселя.
-            val input = FloatArray(64 * 1024)
+            while (isActive) {
 
-            for (rank in 0 until 8) {
-                for (file in 0 until 8) {
-
-                    val tileIndex = rank * 8 + file
-
-                    val startX = file * 32
-                    val startY = (7 - rank) * 32
-
-                    var pixelIndex = 0
-
-                    for (y in 0 until 32) {
-                        for (x in 0 until 32) {
-
-                            val color = resized.getPixel(
-                                startX + x,
-                                startY + y
-                            )
-
-                            val red = (color shr 16) and 255
-                            val green = (color shr 8) and 255
-                            val blue = color and 255
-
-                            val gray = (
-                                0.299f * red +
-                                0.587f * green +
-                                0.114f * blue
-                            ) / 255f
-
-                            input[
-                                tileIndex * 1024 + pixelIndex
-                            ] = gray
-
-                            pixelIndex++
-                        }
-                    }
-                }
-            }
-
-            val tensor = OnnxTensor.createTensor(
-                environment,
-                FloatBuffer.wrap(input),
-                longArrayOf(64, 1024)
-            )
-
-            try {
-                val results = session.run(
-                    mapOf("tiles" to tensor)
+                val captureFile = java.io.File(
+                    context.filesDir,
+                    "last_screen_capture.png"
                 )
 
-                try {
-                    val outputTensor =
-                        results.get("probs").orElseThrow {
-                            IllegalStateException(
-                                "Модель не вернула probs"
+                if (captureFile.exists() && captureFile.length() > 0) {
+
+                    val signature =
+                        "${captureFile.lastModified()}_${captureFile.length()}"
+
+                    if (signature != lastSignature) {
+
+                        lastSignature = signature
+
+                        val source = withContext(Dispatchers.IO) {
+                            BitmapFactory.decodeFile(
+                                captureFile.absolutePath
                             )
-                        } as OnnxTensor
+                        }
 
-                    val probabilities =
-                        outputTensor.floatBuffer
+                        if (source != null) {
 
-                    require(probabilities.remaining() == 64 * 13) {
-                        "Неверный размер выхода модели"
-                    }
+                            previewBitmap = source
+                            isDetecting = true
 
-                    val board = Array(8) {
-                        CharArray(8) { '.' }
-                    }
+                            try {
+                                if (recognizer == null) {
+                                    recognizer = withContext(Dispatchers.IO) {
+                                        ChessPieceRecognizer(context)
+                                    }
+                                }
 
-                    val confidences = mutableListOf<Float>()
-                    val squareResults = mutableListOf<String>()
+                                val result = withContext(Dispatchers.Default) {
 
-                    for (rank in 0 until 8) {
-                        for (file in 0 until 8) {
+                                    if (!ChessBoardDetector.initialize()) {
+                                        throw IllegalStateException(
+                                            "Не удалось инициализировать OpenCV"
+                                        )
+                                    }
 
-                            val tileIndex = rank * 8 + file
+                                    val bounds =
+                                        ChessBoardDetector.detect(source)
 
-                            var bestClass = 0
-                            var bestProbability = -1f
+                                    if (bounds == null) {
+                                        return@withContext Triple<
+                                            Bitmap?,
+                                            PieceRecognitionResult?,
+                                            String
+                                        >(
+                                            null,
+                                            null,
+                                            "Доска не найдена. Продолжаю поиск..."
+                                        )
+                                    }
 
-                            for (classIndex in 0 until 13) {
-
-                                val probability =
-                                    probabilities.get(
-                                        tileIndex * 13 + classIndex
+                                    val left = bounds.x.coerceIn(
+                                        0,
+                                        source.width - 1
                                     )
 
-                                if (probability > bestProbability) {
-                                    bestProbability = probability
-                                    bestClass = classIndex
+                                    val top = bounds.y.coerceIn(
+                                        0,
+                                        source.height - 1
+                                    )
+
+                                    val width = bounds.width.coerceAtMost(
+                                        source.width - left
+                                    )
+
+                                    val height = bounds.height.coerceAtMost(
+                                        source.height - top
+                                    )
+
+                                    if (width <= 0 || height <= 0) {
+                                        return@withContext Triple<
+                                            Bitmap?,
+                                            PieceRecognitionResult?,
+                                            String
+                                        >(
+                                            null,
+                                            null,
+                                            "Некорректные координаты доски"
+                                        )
+                                    }
+
+                                    val crop = Bitmap.createBitmap(
+                                        source,
+                                        left,
+                                        top,
+                                        width,
+                                        height
+                                    )
+
+                                    val recognition =
+                                        recognizer!!.recognize(crop)
+
+                                    Triple(
+                                        crop,
+                                        recognition,
+                                        "Доска найдена. Распознаны 64 клетки."
+                                    )
                                 }
+
+                                detectedBitmap = result.first
+                                recognitionResult = result.second
+                                detectionMessage = result.third
+
+                            } catch (e: Exception) {
+                                detectionMessage =
+                                    "Ошибка: ${e.message}"
+
+                                recognitionResult = null
+                                detectedBitmap = null
+
+                            } finally {
+                                isDetecting = false
                             }
+                        }
+                    }
+                }
 
-                            val label = LABELS[bestClass]
+                delay(1000)
+            }
+        } finally {
+            withContext(Dispatchers.IO) {
+                recognizer?.close()
+            }
+        }
+    }
 
-                            val piece = if (label == '1') {
-                                '.'
-                            } else {
-                                label
-                            }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(DarkBackground)
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
 
-                            board[rank][file] = piece
+        Text(
+            text = "CHESS VISION",
+            color = LimeColor,
+            fontSize = 28.sp,
+            fontWeight = FontWeight.Black
+        )
 
-                            val confidence =
-                                bestProbability.coerceIn(0f, 1f)
+        Text(
+            text = "Автоматическое распознавание шахматных позиций",
+            color = Color.LightGray,
+            fontSize = 13.sp
+        )
 
-                            confidences.add(confidence)
+        Spacer(modifier = Modifier.height(20.dp))
 
-                            val squareName =
-                                "${'a' + file}${rank + 1}"
+        Text(
+            text = "ЗАХВАТ ЭКРАНА",
+            color = LimeColor,
+            fontWeight = FontWeight.Bold
+        )
 
-                            squareResults.add(
-                                "$squareName: $piece " +
-                                "(${String.format("%.2f", confidence)})"
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Button(
+            onClick = {
+                if (capturing) {
+                    onStopCapture()
+                    capturing = false
+                    detectionMessage = "Захват остановлен"
+                } else {
+                    val manager = context.getSystemService(
+                        Context.MEDIA_PROJECTION_SERVICE
+                    ) as MediaProjectionManager
+
+                    captureLauncher.launch(
+                        manager.createScreenCaptureIntent()
+                    )
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (capturing) {
+                    Color(0xFF9B3939)
+                } else {
+                    LimeColor
+                },
+                contentColor = if (capturing) {
+                    Color.White
+                } else {
+                    Color.Black
+                }
+            )
+        ) {
+            Text(
+                text = if (capturing) {
+                    "ОСТАНОВИТЬ ЗАХВАТ"
+                } else {
+                    "НАЧАТЬ ЗАХВАТ ЭКРАНА"
+                },
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(9.dp)
+                    .background(
+                        if (capturing) LimeColor else Color.Gray,
+                        RoundedCornerShape(50)
+                    )
+            )
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Text(
+                text = if (capturing) {
+                    "Захват активен"
+                } else {
+                    "Захват не запущен"
+                },
+                color = Color.LightGray,
+                fontSize = 13.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.height(22.dp))
+
+        Text(
+            text = "ПОСЛЕДНИЙ КАДР",
+            color = LimeColor,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        previewBitmap?.let { bitmap ->
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = "Последний кадр экрана",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(210.dp)
+                    .background(Color.Black),
+                contentScale = ContentScale.Fit
+            )
+        } ?: Text(
+            text = "Здесь появится изображение экрана",
+            color = Color.Gray
+        )
+
+        Spacer(modifier = Modifier.height(22.dp))
+
+        Text(
+            text = "РАСПОЗНАВАНИЕ ДОСКИ",
+            color = LimeColor,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+
+            if (isDetecting) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    color = LimeColor,
+                    strokeWidth = 2.dp
+                )
+
+                Spacer(modifier = Modifier.width(10.dp))
+            }
+
+            Text(
+                text = detectionMessage,
+                color = Color.LightGray,
+                fontSize = 13.sp
+            )
+        }
+
+        detectedBitmap?.let { bitmap ->
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Text(
+                text = "НАЙДЕННАЯ ДОСКА",
+                color = LimeColor,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+            ) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "Обнаруженная шахматная доска",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.FillBounds
+                )
+
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    for (i in 1..7) {
+                        val x = size.width * i / 8f
+                        val y = size.height * i / 8f
+
+                        drawLine(
+                            color = Color.White.copy(alpha = 0.75f),
+                            start = Offset(x, 0f),
+                            end = Offset(x, size.height),
+                            strokeWidth = 1.dp.toPx()
+                        )
+
+                        drawLine(
+                            color = Color.White.copy(alpha = 0.75f),
+                            start = Offset(0f, y),
+                            end = Offset(size.width, y),
+                            strokeWidth = 1.dp.toPx()
+                        )
+                    }
+                }
+            }
+        }
+
+        recognitionResult?.let { result ->
+
+            Spacer(modifier = Modifier.height(22.dp))
+
+            Text(
+                text = "РАСПОЗНАННЫЕ ФИГУРЫ — 8×8",
+                color = LimeColor,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            RecognizedBoard(
+                placement = result.placement
+            )
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Text(
+                text = "FEN",
+                color = LimeColor,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Surface(
+                color = PanelBackground,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = result.fen,
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = "Средняя уверенность: ${
+                    String.format("%.1f", result.meanConfidence * 100)
+                }%",
+                color = Color.LightGray,
+                fontSize = 13.sp
+            )
+
+            Text(
+                text = "Минимальная уверенность: ${
+                    String.format("%.1f", result.minConfidence * 100)
+                }%",
+                color = Color.LightGray,
+                fontSize = 13.sp
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = if (result.reliable) {
+                    "Распознавание прошло проверку уверенности."
+                } else {
+                    "Низкая уверенность: возможны ошибки распознавания."
+                },
+                color = if (result.reliable) {
+                    LimeColor
+                } else {
+                    Color(0xFFFFB45C)
+                },
+                fontSize = 13.sp
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = "Права рокировки и остальные игровые поля FEN пока предполагаются автоматически.",
+                color = Color.Gray,
+                fontSize = 11.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.height(30.dp))
+    }
+}
+
+@Composable
+fun RecognizedBoard(placement: String) {
+
+    val rows = placement.split("/")
+
+    val symbols = mapOf(
+        'K' to "♔",
+        'Q' to "♕",
+        'R' to "♖",
+        'B' to "♗",
+        'N' to "♘",
+        'P' to "♙",
+        'k' to "♚",
+        'q' to "♛",
+        'r' to "♜",
+        'b' to "♝",
+        'n' to "♞",
+        'p' to "♟"
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+    ) {
+        rows.take(8).forEachIndexed { rowIndex, row ->
+
+            val cells = mutableListOf<Char>()
+
+            row.forEach { character ->
+                if (character.isDigit()) {
+                    repeat(character.digitToInt()) {
+                        cells.add('.')
+                    }
+                } else {
+                    cells.add(character)
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                (0 until 8).forEach { columnIndex ->
+
+                    val piece = cells.getOrElse(columnIndex) { '.' }
+                    val isLight = (rowIndex + columnIndex) % 2 == 0
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .background(
+                                if (isLight) {
+                                    Color(0xFFEEEED2)
+                                } else {
+                                    Color(0xFF769656)
+                                }
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (piece != '.') {
+                            Text(
+                                text = symbols[piece] ?: "",
+                                fontSize = 25.sp,
+                                color = if (piece.isUpperCase()) {
+                                    Color.White
+                                } else {
+                                    Color(0xFF171717)
+                                }
                             )
                         }
                     }
-
-                    val placement = buildPlacement(board)
-
-                    val meanConfidence =
-                        confidences.average().toFloat()
-
-                    val minConfidence =
-                        confidences.minOrNull() ?: 0f
-
-                    val castling = inferCastling(board)
-
-                    val fen = "$placement w $castling - 0 1"
-
-                    return PieceRecognitionResult(
-                        placement = placement,
-                        fen = fen,
-                        meanConfidence = meanConfidence,
-                        minConfidence = minConfidence,
-                        reliable = minConfidence >= CONFIDENCE_LIMIT,
-                        squares = squareResults
-                    )
-
-                } finally {
-                    results.close()
-                }
-
-            } finally {
-                tensor.close()
-            }
-
-        } finally {
-            if (resized !== boardBitmap) {
-                resized.recycle()
-            }
-        }
-    }
-
-    private fun buildPlacement(
-        board: Array<CharArray>
-    ): String {
-
-        return (7 downTo 0).joinToString("/") { rank ->
-
-            val result = StringBuilder()
-            var empty = 0
-
-            for (piece in board[rank]) {
-
-                if (piece == '.') {
-                    empty++
-                } else {
-                    if (empty > 0) {
-                        result.append(empty)
-                        empty = 0
-                    }
-
-                    result.append(piece)
                 }
             }
-
-            if (empty > 0) {
-                result.append(empty)
-            }
-
-            result.toString()
         }
-    }
-
-    private fun inferCastling(
-        board: Array<CharArray>
-    ): String {
-
-        val rights = StringBuilder()
-
-        if (board[7][4] == 'K') {
-            if (board[7][7] == 'R') rights.append('K')
-            if (board[7][0] == 'R') rights.append('Q')
-        }
-
-        if (board[0][4] == 'k') {
-            if (board[0][7] == 'r') rights.append('k')
-            if (board[0][0] == 'r') rights.append('q')
-        }
-
-        return if (rights.isEmpty()) "-" else rights.toString()
-    }
-
-    override fun close() {
-        session.close()
     }
 }
