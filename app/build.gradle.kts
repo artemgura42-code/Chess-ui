@@ -51,4 +51,5 @@ dependencies {
     implementation("org.opencv:opencv:4.10.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.1")
 }
