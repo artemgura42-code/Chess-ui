@@ -17,13 +17,8 @@ android {
 packaging {
     jniLibs {
         useLegacyPackaging = true
+keepDebugSymbols += "**/libstockfish.so"
     }
-packaging {
-    jniLibs {
-        useLegacyPackaging = true
-        keepDebugSymbols += "**/libstockfish.so"
-    }
-}
 }
     }
 
