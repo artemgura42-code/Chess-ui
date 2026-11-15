@@ -3,10 +3,11 @@ package com.chessvision.app
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
-import android.graphics.BitmapFactory
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -28,6 +29,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import java.io.File
 
@@ -84,11 +88,17 @@ fun ChessVisionApp(
         mutableStateOf("Захват экрана пока не запущен.")
     }
 
-    var previewBitmap by remember {
-        mutableStateOf<android.graphics.Bitmap?>(null)
+    var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var detectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    var detectionMessage by remember {
+        mutableStateOf("Доска ещё не проверялась.")
     }
 
+    var isDetecting by remember { mutableStateOf(false) }
+
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     val captureLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -104,7 +114,7 @@ fun ChessVisionApp(
         }
     }
 
-    // Автоматически загружаем последний кадр
+    // Получение последнего кадра
     LaunchedEffect(capturing) {
         while (capturing) {
             val file = File(
@@ -113,7 +123,9 @@ fun ChessVisionApp(
             )
 
             if (file.exists() && file.length() > 0) {
-                val bitmap = BitmapFactory.decodeFile(file.absolutePath)
+                val bitmap = withContext(Dispatchers.IO) {
+                    BitmapFactory.decodeFile(file.absolutePath)
+                }
 
                 if (bitmap != null) {
                     previewBitmap = bitmap
@@ -150,24 +162,24 @@ fun ChessVisionApp(
                 letterSpacing = 3.sp
             )
 
-            Spacer(Modifier.height(30.dp))
+            Spacer(Modifier.height(28.dp))
 
             Text(
-                "Захват экрана",
+                "Компьютерное зрение",
                 color = Color.White,
-                fontSize = 30.sp,
+                fontSize = 27.sp,
                 fontWeight = FontWeight.Bold
             )
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
 
             Text(
-                "Получение изображения шахматной партии с экрана телефона.",
+                "Захват изображения и обнаружение шахматной доски.",
                 color = Muted,
-                fontSize = 15.sp
+                fontSize = 14.sp
             )
 
-            Spacer(Modifier.height(25.dp))
+            Spacer(Modifier.height(24.dp))
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -176,36 +188,30 @@ fun ChessVisionApp(
                     containerColor = Panel
                 )
             ) {
-                Column(
-                    modifier = Modifier.padding(20.dp)
-                ) {
+                Column(Modifier.padding(18.dp)) {
+
                     Text(
-                        "СОСТОЯНИЕ СИСТЕМЫ",
+                        "ЗАХВАТ ЭКРАНА",
                         color = Lime,
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.5.sp
+                        fontWeight = FontWeight.Bold
                     )
 
-                    Spacer(Modifier.height(15.dp))
+                    Spacer(Modifier.height(12.dp))
 
                     Text(
                         if (capturing) "Захват активен"
                         else "Ожидание запуска",
                         color = Color.White,
-                        fontSize = 22.sp,
+                        fontSize = 21.sp,
                         fontWeight = FontWeight.Bold
                     )
 
                     Spacer(Modifier.height(8.dp))
 
-                    Text(
-                        message,
-                        color = Muted,
-                        fontSize = 14.sp
-                    )
+                    Text(message, color = Muted, fontSize = 13.sp)
 
-                    Spacer(Modifier.height(22.dp))
+                    Spacer(Modifier.height(18.dp))
 
                     Button(
                         onClick = {
@@ -222,16 +228,12 @@ fun ChessVisionApp(
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Lime,
                             contentColor = Color.Black
-                        ),
-                        shape = RoundedCornerShape(13.dp)
-                    ) {
-                        Text(
-                            "Начать захват экрана",
-                            fontWeight = FontWeight.Bold
                         )
+                    ) {
+                        Text("Начать захват экрана")
                     }
 
-                    Spacer(Modifier.height(10.dp))
+                    Spacer(Modifier.height(8.dp))
 
                     OutlinedButton(
                         onClick = {
@@ -242,22 +244,18 @@ fun ChessVisionApp(
                         enabled = capturing,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(
-                            "Остановить захват",
-                            color = Lime
-                        )
+                        Text("Остановить захват", color = Lime)
                     }
                 }
             }
 
-            Spacer(Modifier.height(25.dp))
+            Spacer(Modifier.height(24.dp))
 
             Text(
                 "ПОСЛЕДНИЙ КАДР",
                 color = Lime,
                 fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.5.sp
+                fontWeight = FontWeight.Bold
             )
 
             Spacer(Modifier.height(12.dp))
@@ -272,7 +270,7 @@ fun ChessVisionApp(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(280.dp)
+                        .height(250.dp)
                         .padding(10.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -281,30 +279,157 @@ fun ChessVisionApp(
                     if (bitmap != null) {
                         Image(
                             bitmap = bitmap.asImageBitmap(),
-                            contentDescription = "Последний захваченный кадр",
+                            contentDescription = "Захваченный экран",
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Fit
                         )
                     } else {
                         Text(
-                            if (capturing)
-                                "Ожидание первого изображения..."
-                            else
-                                "Запусти захват, чтобы увидеть изображение",
-                            color = Muted,
-                            fontSize = 14.sp
+                            "Ожидание изображения...",
+                            color = Muted
                         )
                     }
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(24.dp))
 
             Text(
-                "Изображение обновляется автоматически во время захвата.",
-                color = Muted,
-                fontSize = 12.sp
+                "РАСПОЗНАВАНИЕ ДОСКИ",
+                color = Lime,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
             )
+
+            Spacer(Modifier.height(10.dp))
+
+            Text(
+                detectionMessage,
+                color = Muted,
+                fontSize = 14.sp
+            )
+
+            Spacer(Modifier.height(14.dp))
+
+            Button(
+                onClick = {
+                    val source = previewBitmap
+
+                    if (source == null) {
+                        detectionMessage =
+                            "Сначала необходимо получить изображение экрана."
+                    } else if (!isDetecting) {
+
+                        isDetecting = true
+                        detectedBitmap = null
+                        detectionMessage = "Ищем шахматную доску..."
+
+                        scope.launch {
+                            try {
+                                val result = withContext(Dispatchers.Default) {
+                                    if (!ChessBoardDetector.initialize()) {
+                                        throw IllegalStateException(
+                                            "Не удалось загрузить OpenCV."
+                                        )
+                                    }
+
+                                    ChessBoardDetector.detect(source)
+                                }
+
+                                if (result != null) {
+                                    val left = result.x.coerceIn(
+                                        0,
+                                        source.width - 1
+                                    )
+                                    val top = result.y.coerceIn(
+                                        0,
+                                        source.height - 1
+                                    )
+
+                                    val width = result.width.coerceAtMost(
+                                        source.width - left
+                                    )
+
+                                    val height = result.height.coerceAtMost(
+                                        source.height - top
+                                    )
+
+                                    if (width > 0 && height > 0) {
+                                        detectedBitmap = Bitmap.createBitmap(
+                                            source,
+                                            left,
+                                            top,
+                                            width,
+                                            height
+                                        )
+
+                                        detectionMessage =
+                                            "Найдена квадратная область: " +
+                                            "${width} × ${height} px. " +
+                                            "Координаты: $left, $top."
+                                    } else {
+                                        detectionMessage =
+                                            "Обнаруженная область имеет неверные размеры."
+                                    }
+                                } else {
+                                    detectionMessage =
+                                        "Подходящая квадратная область не найдена."
+                                }
+
+                            } catch (e: Exception) {
+                                detectionMessage =
+                                    "Ошибка распознавания: ${e.message}"
+                            } finally {
+                                isDetecting = false
+                            }
+                        }
+                    }
+                },
+                enabled = previewBitmap != null && !isDetecting,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Lime,
+                    contentColor = Color.Black
+                ),
+                shape = RoundedCornerShape(13.dp)
+            ) {
+                Text(
+                    if (isDetecting) "Выполняется поиск..."
+                    else "Найти шахматную доску",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            if (detectedBitmap != null) {
+                Text(
+                    "НАЙДЕННАЯ ОБЛАСТЬ",
+                    color = Lime,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Spacer(Modifier.height(10.dp))
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Panel
+                    ),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Image(
+                        bitmap = detectedBitmap!!.asImageBitmap(),
+                        contentDescription = "Обнаруженная квадратная область",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(260.dp)
+                            .padding(10.dp),
+                        contentScale = ContentScale.Fit
+                    )
+                }
+            }
 
             Spacer(Modifier.height(28.dp))
 
@@ -312,35 +437,15 @@ fun ChessVisionApp(
                 "СЛЕДУЮЩИЕ ЭТАПЫ",
                 color = Muted,
                 fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.5.sp
+                fontWeight = FontWeight.Bold
             )
 
             Spacer(Modifier.height(12.dp))
 
-            InfoItem(
-                "01",
-                "Получение изображения",
-                "Захват кадров экрана телефона."
-            )
-
-            InfoItem(
-                "02",
-                "Распознавание доски",
-                "Определение границ шахматной доски."
-            )
-
-            InfoItem(
-                "03",
-                "Распознавание фигур",
-                "Определение расположения фигур."
-            )
-
-            InfoItem(
-                "04",
-                "Шахматный анализ",
-                "Подготовка позиции для Stockfish 10."
-            )
+            InfoItem("01", "Обнаружение доски", "Поиск квадратной области.")
+            InfoItem("02", "Разделение клеток", "Создание сетки 8 × 8.")
+            InfoItem("03", "Распознавание фигур", "Определение типа и цвета фигур.")
+            InfoItem("04", "Формирование FEN", "Подготовка позиции для анализа.")
 
             Spacer(Modifier.height(20.dp))
 
@@ -362,7 +467,7 @@ fun InfoItem(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 9.dp),
+            .padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
