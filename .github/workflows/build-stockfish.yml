@@ -21,11 +21,18 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+
       - name: Install Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+          accept-android-sdk-licenses: true
 
       - name: Install Android NDK
-        run: sdkmanager --install "ndk;27.2.12479018"
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager --sdk_root="$ANDROID_HOME" --install "ndk;27.2.12479018"
+
 
       - name: Download Stockfish source
         run: |
