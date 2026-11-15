@@ -45,7 +45,6 @@ class ChessOverlayManager(
     private var collapsed = false
 
     private lateinit var layoutParams: WindowManager.LayoutParams
-    private lateinit var arrowLayoutParams: WindowManager.LayoutParams
 
     private var bestMove = "Ожидание хода..."
     private var evaluation = ""
@@ -89,14 +88,6 @@ class ChessOverlayManager(
         }
     }
 
-    /**
-     * Показывает стрелку на доске.
-     *
-     * move: ход Stockfish в формате UCI, например e2e4.
-     * boardLeft / boardTop: координаты левого верхнего угла доски.
-     * boardWidth / boardHeight: размеры доски в пикселях.
-     * whiteAtBottom: true, если белые фигуры находятся снизу.
-     */
     fun updateArrow(
         move: String,
         boardLeft: Int,
@@ -128,9 +119,6 @@ class ChessOverlayManager(
         }
     }
 
-    /**
-     * Убирает стрелку с экрана.
-     */
     fun clearArrow() {
         mainHandler.post {
             arrowView?.clearArrow()
@@ -165,11 +153,6 @@ class ChessOverlayManager(
         }
     }
 
-    /**
-     * Прозрачный полноэкранный слой.
-     * FLAG_NOT_TOUCHABLE гарантирует, что он не мешает нажимать
-     * на клетки шахматной доски.
-     */
     private fun createArrowLayer() {
         if (arrowView != null || !hasPermission()) return
 
@@ -200,7 +183,6 @@ class ChessOverlayManager(
         try {
             windowManager.addView(view, params)
             arrowView = view
-            arrowLayoutParams = params
         } catch (e: Exception) {
             e.printStackTrace()
             arrowView = null
@@ -311,7 +293,7 @@ class ChessOverlayManager(
         content.addView(stopButton, stopParams)
         root.addView(content)
 
-        contentView = content
+        // Сохраняем ссылки на элементы панели.
         moveView = move
         evaluationView = eval
         statusView = statusText
@@ -329,7 +311,7 @@ class ChessOverlayManager(
             collapse.text = if (collapsed) "+" else "—"
         }
 
-        // Перемещение панели пальцем за её заголовок.
+        // Перемещение панели пальцем за заголовок.
         title.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -442,9 +424,6 @@ class ChessOverlayManager(
         ).toInt()
     }
 
-    /**
-     * Отдельный View, рисующий стрелку поверх экрана.
-     */
     private inner class ChessArrowView(
         context: Context
     ) : View(context) {
