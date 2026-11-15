@@ -38,7 +38,10 @@ class ScreenCaptureService : Service() {
     companion object {
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_DATA = "projection_data"
-        const val ACTION_STOP = "com.chessvision.app.STOP_CAPTURE"
+
+        const val ACTION_STOP =
+            "com.chessvision.app.STOP_CAPTURE"
+
         const val ACTION_STATE_UPDATE =
             "com.chessvision.app.CHESS_STATE_UPDATE"
 
@@ -70,10 +73,10 @@ class ScreenCaptureService : Service() {
     private var recognizer: ChessPieceRecognizer? = null
     private val tracker = ChessGameTracker()
 
-    // Плавающая панель и стрелка CHESS VISION.
     private var overlayManager: ChessOverlayManager? = null
 
     private var lastQueuedAt = 0L
+
     private var candidatePlacement = ""
     private var candidateCount = 0
     private var lastProcessedPlacement = ""
@@ -82,6 +85,13 @@ class ScreenCaptureService : Service() {
     private var trackedFen: String? = null
     private var trackedPlayerColor: String? = null
     private var totalMoves = 0
+
+    // Ожидание ручного выбора стороны хода.
+    @Volatile
+    private var awaitingTurnSelection = false
+
+    private var pendingPlacement: String? = null
+    private var pendingPlayerColor: String? = null
 
     @Volatile
     private var latestFen: String? = null
@@ -92,19 +102,21 @@ class ScreenCaptureService : Service() {
     @Volatile
     private var latestBoardOverlay: BoardOverlayState? = null
 
-    private var trackerMessage = "Ожидаю начальную позицию партии"
-    private var engineMessage = "Stockfish ожидает начала партии"
+    private var trackerMessage =
+        "Ожидаю начальную позицию партии"
 
-    // Текстовый ход для панели.
+    private var engineMessage =
+        "Stockfish ожидает начала партии"
+
     private var lastBestMove = ""
 
-    // Исходный UCI-ход для рисования стрелки.
     @Volatile
     private var lastBestMoveUci = ""
 
     private var lastEvaluation = ""
 
-    private var recognitionMessage = "Ожидание захвата экрана"
+    private var recognitionMessage =
+        "Ожидание захвата экрана"
 
     private val projectionCallback =
         object : MediaProjection.Callback() {
@@ -115,11 +127,24 @@ class ScreenCaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+
         createNotificationChannel()
 
-        overlayManager = ChessOverlayManager(this) {
-            stopSelf()
-        }
+        overlayManager = ChessOverlayManager(
+            context = this,
+            onStop = {
+                stopSelf()
+            },
+            onSideToMoveSelected = { side ->
+                try {
+                    processingExecutor.execute {
+                        acceptTurnSelection(side)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        )
     }
 
     override fun onStartCommand(
@@ -133,7 +158,7 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
 
-        // Не создаём второй MediaProjection при повторном запуске сервиса.
+        // Не создаём второй MediaProjection при повторном запуске.
         if (mediaProjection != null) {
             return START_NOT_STICKY
         }
@@ -174,7 +199,10 @@ class ScreenCaptureService : Service() {
                 Context.MEDIA_PROJECTION_SERVICE
             ) as MediaProjectionManager
 
-            val projection = manager.getMediaProjection(resultCode, data)
+            val projection = manager.getMediaProjection(
+                resultCode,
+                data
+            )
 
             if (projection == null) {
                 stopSelf()
@@ -218,9 +246,9 @@ class ScreenCaptureService : Service() {
                 mainHandler
             )
 
-            recognitionMessage = "Захват активен. Ищу шахматную доску..."
+            recognitionMessage =
+                "Захват активен. Ищу шахматную доску..."
 
-            // Показываем панель и прозрачный слой для стрелки.
             overlayManager?.show()
 
             overlayManager?.update(
@@ -244,10 +272,6 @@ class ScreenCaptureService : Service() {
         return START_NOT_STICKY
     }
 
-    /**
-     * Получает кадр с ImageReader.
-     * Частота обработки ограничена одним кадром в секунду.
-     */
     private fun receiveFrame(reader: ImageReader) {
         val now = System.currentTimeMillis()
 
@@ -296,9 +320,6 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    /**
-     * Преобразует ImageReader Image в обычный Bitmap.
-     */
     private fun imageToBitmap(image: Image): Bitmap {
         val plane = image.planes[0]
         val buffer = plane.buffer
@@ -333,9 +354,6 @@ class ScreenCaptureService : Service() {
         return result
     }
 
-    /**
-     * Сохраняет последний кадр для превью в MainActivity.
-     */
     private fun saveFrame(bitmap: Bitmap) {
         val file = File(filesDir, "last_screen_capture.png")
 
@@ -349,7 +367,7 @@ class ScreenCaptureService : Service() {
     }
 
     /**
-     * Полный цикл распознавания и отслеживания позиции.
+     * Основной цикл распознавания.
      */
     private fun processFrame(source: Bitmap) {
 
@@ -431,7 +449,6 @@ class ScreenCaptureService : Service() {
             return
         }
 
-        // Сохраняем координаты доски для рисования стрелки.
         val bottomColor =
             trackedPlayerColor ?: recognized.playerColor
 
@@ -452,99 +469,250 @@ class ScreenCaptureService : Service() {
             candidateCount = 1
         }
 
-        // Подтверждаем позицию двумя одинаковыми распознаваниями.
+        // Требуем два последовательных одинаковых распознавания.
         if (
-            candidateCount >= 2 &&
-            placement != lastProcessedPlacement
+            candidateCount < 2 ||
+            placement == lastProcessedPlacement
         ) {
-            lastProcessedPlacement = placement
+            publishState()
+            return
+        }
 
-            val wasStarted = gameStarted
+        /*
+         * Если ждём выбора стороны хода, обновляем ожидаемую
+         * позицию. Если появилась начальная расстановка,
+         * отменяем запрос и автоматически начинаем новую партию.
+         */
+        if (awaitingTurnSelection) {
 
-            val outcome = if (wasStarted) {
-                tracker.update(placement)
+            if (placement == ChessGameTracker.START_PLACEMENT) {
+                awaitingTurnSelection = false
+                pendingPlacement = null
+                pendingPlayerColor = null
+
+                overlayManager?.hideTurnSelection()
+
+                tracker.reset()
+                resetGameState()
+
+                trackerMessage =
+                    "Обнаружена новая партия. Начинаю отслеживание..."
+
             } else {
-                tracker.start(
-                    initialPlacement = placement,
-                    detectedPlayerColor = recognized.playerColor
-                )
+                pendingPlacement = placement
+                pendingPlayerColor = recognized.playerColor
+                lastProcessedPlacement = placement
+
+                trackerMessage =
+                    "Контекст партии потерян. Укажите, чей сейчас ход."
+
+                publishState()
+                return
             }
+        }
 
-            trackerMessage = outcome.status
+        /*
+         * Если доска вернулась к начальной расстановке,
+         * это новая партия. Сбрасываем старую историю.
+         */
+        if (
+            gameStarted &&
+            placement == ChessGameTracker.START_PLACEMENT
+        ) {
+            tracker.reset()
+            resetGameState()
 
-            if (outcome.fen != null) {
-                trackedFen = outcome.fen
-                latestFen = outcome.fen
+            trackerMessage =
+                "Обнаружена новая партия. Начинаю отслеживание..."
+        }
 
-                trackedPlayerColor =
-                    outcome.playerColor ?: recognized.playerColor
+        lastProcessedPlacement = placement
 
-                // Обновляем ориентацию доски после определения цвета.
-                latestBoardOverlay = BoardOverlayState(
-                    left = left,
-                    top = top,
-                    width = width,
-                    height = height,
-                    whiteAtBottom = trackedPlayerColor == "w"
-                )
+        val outcome = if (gameStarted) {
+            tracker.update(placement)
+        } else {
+            tracker.start(
+                initialPlacement = placement,
+                detectedPlayerColor = recognized.playerColor
+            )
+        }
 
-                if (!wasStarted) {
-                    gameStarted = true
+        trackerMessage = outcome.status
 
-                    totalMoves = outcome.movesDetected
+        if (outcome.fen != null) {
 
-                    lastSubmittedFen = ""
-                    engineMessage =
-                        "Партия восстановлена. Проверяю очередь хода..."
-                } else if (outcome.advanced) {
-                    totalMoves += outcome.movesDetected
-                }
+            trackedFen = outcome.fen
+            latestFen = outcome.fen
 
-                // Проверяем, не наступила ли очередь игрока.
-                scheduleStockfishIfNeeded()
+            trackedPlayerColor =
+                outcome.playerColor ?: recognized.playerColor
 
-            } else if (wasStarted) {
-                // Обнаружена новая начальная позиция.
-                gameStarted = false
-                trackedFen = null
-                latestFen = null
-                trackedPlayerColor = null
-                totalMoves = 0
+            latestBoardOverlay = BoardOverlayState(
+                left = left,
+                top = top,
+                width = width,
+                height = height,
+                whiteAtBottom = trackedPlayerColor == "w"
+            )
+
+            if (!gameStarted) {
+                gameStarted = true
+                totalMoves = outcome.movesDetected
+
                 lastSubmittedFen = ""
 
-                lastBestMove = ""
-                lastBestMoveUci = ""
-                lastEvaluation = ""
+                engineMessage =
+                    "Позиция восстановлена. Проверяю очередь хода..."
 
-                latestBoardOverlay = BoardOverlayState(
-                    left = left,
-                    top = top,
-                    width = width,
-                    height = height,
-                    whiteAtBottom = recognized.playerColor == "w"
-                )
+                overlayManager?.hideTurnSelection()
 
-                overlayManager?.clearArrow()
-
-                trackerMessage = outcome.status
-                engineMessage = "Ожидаю начала новой партии"
-
-                lastProcessedPlacement = ""
-                candidateCount = 0
+            } else if (outcome.advanced) {
+                totalMoves += outcome.movesDetected
             }
+
+            scheduleStockfishIfNeeded()
+
+        } else {
+            /*
+             * Историю восстановить не получилось.
+             * Просим пользователя указать, чей сейчас ход.
+             */
+            enterTurnSelection(
+                placement = placement,
+                playerColor = recognized.playerColor
+            )
         }
 
         publishState()
     }
 
     /**
+     * Включает режим восстановления контекста партии.
+     */
+    private fun enterTurnSelection(
+        placement: String,
+        playerColor: String
+    ) {
+        awaitingTurnSelection = true
+
+        pendingPlacement = placement
+        pendingPlayerColor = playerColor
+
+        tracker.reset()
+
+        gameStarted = false
+        trackedFen = null
+        latestFen = null
+        trackedPlayerColor = playerColor
+        totalMoves = 0
+
+        lastSubmittedFen = ""
+
+        lastBestMove = ""
+        lastBestMoveUci = ""
+        lastEvaluation = ""
+
+        overlayManager?.clearArrow()
+        overlayManager?.showTurnSelection()
+
+        trackerMessage =
+            "Контекст партии потерян. Укажите, чей сейчас ход."
+
+        engineMessage =
+            "Ожидаю выбора очереди хода"
+    }
+
+    /**
+     * Пользователь нажал «Ход белых» или «Ход чёрных».
+     */
+    private fun acceptTurnSelection(sideToMove: String) {
+
+        if (!awaitingTurnSelection) return
+
+        val placement = pendingPlacement ?: return
+        val playerColor = pendingPlayerColor ?: return
+
+        val result = tracker.startFromPosition(
+            initialPlacement = placement,
+            detectedPlayerColor = playerColor,
+            sideToMove = sideToMove
+        )
+
+        if (result.fen == null) {
+            trackerMessage = result.status
+            engineMessage = "Не удалось восстановить позицию"
+
+            publishState()
+            return
+        }
+
+        awaitingTurnSelection = false
+
+        pendingPlacement = null
+        pendingPlayerColor = null
+
+        gameStarted = true
+
+        trackedFen = result.fen
+        latestFen = result.fen
+        trackedPlayerColor = result.playerColor
+
+        totalMoves = 0
+
+        lastProcessedPlacement = placement
+        candidatePlacement = placement
+        candidateCount = 2
+
+        lastSubmittedFen = ""
+
+        lastBestMove = ""
+        lastBestMoveUci = ""
+        lastEvaluation = ""
+
+        trackerMessage = result.status
+
+        engineMessage =
+            "Позиция восстановлена. Запускаю Stockfish..."
+
+        overlayManager?.hideTurnSelection()
+
+        scheduleStockfishIfNeeded()
+        publishState()
+    }
+
+    /**
+     * Сбрасывает состояние старой партии.
+     */
+    private fun resetGameState() {
+
+        gameStarted = false
+
+        trackedFen = null
+        latestFen = null
+        trackedPlayerColor = null
+
+        totalMoves = 0
+
+        lastSubmittedFen = ""
+
+        lastBestMove = ""
+        lastBestMoveUci = ""
+        lastEvaluation = ""
+
+        latestBoardOverlay = null
+
+        overlayManager?.clearArrow()
+    }
+
+    /**
      * Запускает Stockfish только тогда, когда очередь хода за игроком.
      */
     private fun scheduleStockfishIfNeeded() {
+
         val fen = trackedFen ?: return
         val playerColor = trackedPlayerColor ?: return
 
-        if (!gameStarted) return
+        if (!gameStarted || awaitingTurnSelection) return
 
         val parts = fen.trim().split(Regex("\\s+"))
 
@@ -556,6 +724,7 @@ class ScreenCaptureService : Service() {
         val sideToMove = parts[1]
 
         if (sideToMove != playerColor) {
+
             lastBestMove = ""
             lastBestMoveUci = ""
             lastEvaluation = ""
@@ -573,16 +742,14 @@ class ScreenCaptureService : Service() {
 
         if (fen == lastSubmittedFen) return
 
-        // Убираем рекомендацию от предыдущей позиции.
         lastBestMove = ""
         lastBestMoveUci = ""
         lastEvaluation = ""
 
         overlayManager?.clearArrow()
 
-        // Сохраняем позицию до запуска анализа,
-        // чтобы не запустить несколько одинаковых задач.
         lastSubmittedFen = fen
+
         engineMessage = "Stockfish анализирует позицию..."
         publishState()
 
@@ -601,8 +768,7 @@ class ScreenCaptureService : Service() {
     }
 
     /**
-     * Анализирует позицию и обновляет плавающую панель.
-     * Уведомления с рекомендациями ходов не отправляются.
+     * Анализ Stockfish.
      */
     private fun analyzeWithStockfish(fen: String) {
         try {
@@ -610,7 +776,6 @@ class ScreenCaptureService : Service() {
                 it.analyze(fen)
             }
 
-            // Не показываем результат устаревшей позиции.
             if (latestFen != fen) {
                 return
             }
@@ -624,15 +789,15 @@ class ScreenCaptureService : Service() {
                 lastBestMoveUci = ""
                 lastEvaluation = ""
 
-                engineMessage = "Stockfish не нашёл доступный ход"
+                engineMessage =
+                    "Stockfish не нашёл доступный ход"
+
                 publishState()
                 return
             }
 
-            // Исходный UCI-ход нужен для координат стрелки.
             lastBestMoveUci = result.bestMove
 
-            // Отформатированный ход оставляем для панели.
             lastBestMove =
                 MoveNotifier.formatMove(result.bestMove)
 
@@ -655,16 +820,17 @@ class ScreenCaptureService : Service() {
                     "Ошибка Stockfish: ${e.message ?: "неизвестная ошибка"}"
 
                 lastSubmittedFen = ""
+
                 publishState()
             }
         }
     }
 
     /**
-     * Передаёт актуальное состояние MainActivity
-     * и обновляет плавающую панель и стрелку.
+     * Обновляет панель, стрелку и MainActivity.
      */
     private fun publishState() {
+
         val intent = Intent(ACTION_STATE_UPDATE).apply {
             setPackage(packageName)
 
@@ -688,14 +854,14 @@ class ScreenCaptureService : Service() {
             engineMessage
         )
 
-        // Рисуем стрелку по координатам последней найденной доски.
         val board = latestBoardOverlay
         val move = lastBestMoveUci
 
         if (
             board != null &&
             move.length >= 4 &&
-            gameStarted
+            gameStarted &&
+            !awaitingTurnSelection
         ) {
             overlayManager?.updateArrow(
                 move = move,
@@ -712,6 +878,7 @@ class ScreenCaptureService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "CHESS VISION",
@@ -727,6 +894,7 @@ class ScreenCaptureService : Service() {
     }
 
     private fun createNotification(): Notification {
+
         val stopIntent = Intent(
             this,
             ScreenCaptureService::class.java
@@ -756,12 +924,16 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onDestroy() {
-        // Убираем панель и стрелку.
+
         overlayManager?.hide()
         overlayManager = null
 
         latestBoardOverlay = null
         lastBestMoveUci = ""
+
+        awaitingTurnSelection = false
+        pendingPlacement = null
+        pendingPlayerColor = null
 
         imageReader?.setOnImageAvailableListener(null, null)
 
