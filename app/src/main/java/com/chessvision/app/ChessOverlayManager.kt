@@ -47,6 +47,10 @@ class ChessOverlayManager(
 
     private var collapsed = false
 
+    // Запоминаем запрос, даже если панель ещё не создана.
+    @Volatile
+    private var turnSelectionRequested = false
+
     private lateinit var layoutParams: WindowManager.LayoutParams
 
     private var bestMove = "Ожидание хода..."
@@ -67,17 +71,18 @@ class ChessOverlayManager(
         mainHandler.post {
             if (!hasPermission()) return@post
 
-            if (rootView != null) {
-                if (arrowView == null) {
-                    createArrowLayer()
-                }
-
-                updateViews()
-                return@post
+            if (rootView == null) {
+                createArrowLayer()
+                createPanel()
+            } else if (arrowView == null) {
+                createArrowLayer()
             }
 
-            createArrowLayer()
-            createPanel()
+            updateViews()
+
+            if (turnSelectionRequested) {
+                displayTurnSelection()
+            }
         }
     }
 
@@ -90,7 +95,6 @@ class ChessOverlayManager(
             bestMove = move
             evaluation = newEvaluation
             status = newStatus
-
             updateViews()
         }
     }
@@ -133,33 +137,52 @@ class ChessOverlayManager(
     }
 
     /**
-     * Показывает запрос: чей сейчас ход.
+     * Запрашивает выбор очереди хода.
+     * Запрос не потеряется, даже если панель ещё не создана.
      */
     fun showTurnSelection() {
+        turnSelectionRequested = true
+
         mainHandler.post {
-            val content = contentView ?: return@post
+            if (!hasPermission()) return@post
 
-            collapsed = false
-            content.visibility = View.VISIBLE
-            collapseButton?.text = "—"
+            if (rootView == null) {
+                createArrowLayer()
+                createPanel()
+            }
 
-            turnSelectionView?.visibility = View.VISIBLE
-
-            status = "Контекст партии потерян. Укажите очередь хода."
-            updateViews()
+            displayTurnSelection()
         }
+    }
+
+    private fun displayTurnSelection() {
+        val content = contentView ?: return
+        val selection = turnSelectionView ?: return
+
+        collapsed = false
+        content.visibility = View.VISIBLE
+        collapseButton?.text = "—"
+
+        selection.visibility = View.VISIBLE
+
+        status = "Контекст партии потерян. Укажите очередь хода."
+        updateViews()
     }
 
     /**
      * Убирает запрос выбора стороны.
      */
     fun hideTurnSelection() {
+        turnSelectionRequested = false
+
         mainHandler.post {
             turnSelectionView?.visibility = View.GONE
         }
     }
 
     fun hide() {
+        turnSelectionRequested = false
+
         mainHandler.post {
             val panel = rootView
             val arrow = arrowView
@@ -186,6 +209,7 @@ class ChessOverlayManager(
             statusView = null
             collapseButton = null
             turnSelectionView = null
+            collapsed = false
         }
     }
 
@@ -226,6 +250,8 @@ class ChessOverlayManager(
     }
 
     private fun createPanel() {
+        if (rootView != null || !hasPermission()) return
+
         val root = LinearLayout(appContext).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(9), dp(12), dp(10))
@@ -306,7 +332,11 @@ class ChessOverlayManager(
         val turnSelection = LinearLayout(appContext).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(10), 0, 0)
-            visibility = View.GONE
+            visibility = if (turnSelectionRequested) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
         }
 
         val turnTitle = createText(
@@ -412,6 +442,9 @@ class ChessOverlayManager(
         turnSelectionView = turnSelection
 
         collapse.setOnClickListener {
+            // Не позволяем свернуть панель во время выбора хода.
+            if (turnSelectionRequested) return@setOnClickListener
+
             collapsed = !collapsed
 
             content.visibility = if (collapsed) {
@@ -435,6 +468,9 @@ class ChessOverlayManager(
                 }
 
                 MotionEvent.ACTION_MOVE -> {
+                    initialX =
+                        initialX
+
                     layoutParams.x =
                         initialX + (event.rawX - initialTouchX).toInt()
 
@@ -480,9 +516,16 @@ class ChessOverlayManager(
         try {
             windowManager.addView(root, layoutParams)
             rootView = root
-            updateViews()
+
+            if (turnSelectionRequested) {
+                displayTurnSelection()
+            } else {
+                updateViews()
+            }
         } catch (e: Exception) {
             rootView = null
+            contentView = null
+            turnSelectionView = null
             e.printStackTrace()
         }
     }
@@ -499,6 +542,7 @@ class ChessOverlayManager(
             setTextColor(Color.WHITE)
             setTypeface(null, android.graphics.Typeface.BOLD)
             background = roundedBackground(color, 8)
+
             setOnClickListener {
                 onClick()
             }
