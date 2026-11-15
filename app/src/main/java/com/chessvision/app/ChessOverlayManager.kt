@@ -47,7 +47,6 @@ class ChessOverlayManager(
 
     private var collapsed = false
 
-    // Запоминаем запрос, даже если панель ещё не создана.
     @Volatile
     private var turnSelectionRequested = false
 
@@ -136,10 +135,6 @@ class ChessOverlayManager(
         }
     }
 
-    /**
-     * Запрашивает выбор очереди хода.
-     * Запрос не потеряется, даже если панель ещё не создана.
-     */
     fun showTurnSelection() {
         turnSelectionRequested = true
 
@@ -169,9 +164,6 @@ class ChessOverlayManager(
         updateViews()
     }
 
-    /**
-     * Убирает запрос выбора стороны.
-     */
     fun hideTurnSelection() {
         turnSelectionRequested = false
 
@@ -184,19 +176,16 @@ class ChessOverlayManager(
         turnSelectionRequested = false
 
         mainHandler.post {
-            val panel = rootView
-            val arrow = arrowView
-
             try {
-                if (panel != null) {
-                    windowManager.removeView(panel)
+                rootView?.let {
+                    windowManager.removeView(it)
                 }
             } catch (_: Exception) {
             }
 
             try {
-                if (arrow != null) {
-                    windowManager.removeView(arrow)
+                arrowView?.let {
+                    windowManager.removeView(it)
                 }
             } catch (_: Exception) {
             }
@@ -232,7 +221,8 @@ class ChessOverlayManager(
             windowType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -328,7 +318,6 @@ class ChessOverlayManager(
         content.addView(eval)
         content.addView(statusText)
 
-        // Блок выбора очереди хода.
         val turnSelection = LinearLayout(appContext).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(10), 0, 0)
@@ -374,25 +363,27 @@ class ChessOverlayManager(
             onSideToMoveSelected("b")
         }
 
-        val choiceParams = LinearLayout.LayoutParams(
-            0,
-            dp(42),
-            1f
-        ).apply {
-            marginEnd = dp(4)
-        }
+        choices.addView(
+            whiteButton,
+            LinearLayout.LayoutParams(
+                0,
+                dp(42),
+                1f
+            ).apply {
+                marginEnd = dp(4)
+            }
+        )
 
-        choices.addView(whiteButton, choiceParams)
-
-        val blackParams = LinearLayout.LayoutParams(
-            0,
-            dp(42),
-            1f
-        ).apply {
-            marginStart = dp(4)
-        }
-
-        choices.addView(blackButton, blackParams)
+        choices.addView(
+            blackButton,
+            LinearLayout.LayoutParams(
+                0,
+                dp(42),
+                1f
+            ).apply {
+                marginStart = dp(4)
+            }
+        )
 
         turnSelection.addView(
             choices,
@@ -424,14 +415,16 @@ class ChessOverlayManager(
             }
         }
 
-        val stopParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            topMargin = dp(12)
-        }
+        content.addView(
+            stopButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(12)
+            }
+        )
 
-        content.addView(stopButton, stopParams)
         root.addView(content)
 
         contentView = content
@@ -442,7 +435,6 @@ class ChessOverlayManager(
         turnSelectionView = turnSelection
 
         collapse.setOnClickListener {
-            // Не позволяем свернуть панель во время выбора хода.
             if (turnSelectionRequested) return@setOnClickListener
 
             collapsed = !collapsed
@@ -456,7 +448,6 @@ class ChessOverlayManager(
             collapse.text = if (collapsed) "+" else "—"
         }
 
-        // Перемещение панели за заголовок.
         title.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -468,9 +459,6 @@ class ChessOverlayManager(
                 }
 
                 MotionEvent.ACTION_MOVE -> {
-                    initialX =
-                        initialX
-
                     layoutParams.x =
                         initialX + (event.rawX - initialTouchX).toInt()
 
@@ -505,7 +493,8 @@ class ChessOverlayManager(
             WindowManager.LayoutParams.WRAP_CONTENT,
             windowType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
