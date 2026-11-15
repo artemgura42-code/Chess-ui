@@ -1,10 +1,11 @@
-
 package com.chessvision.app
 
 import android.Manifest
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -15,7 +16,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -26,7 +26,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -34,6 +33,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -64,7 +64,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             ChessVisionApp(
                 onStartCapture = { resultCode, data ->
-                    val intent = Intent(
+                    val serviceIntent = Intent(
                         this,
                         ScreenCaptureService::class.java
                     ).apply {
@@ -79,15 +79,20 @@ class MainActivity : ComponentActivity() {
                     }
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(intent)
+                        startForegroundService(serviceIntent)
                     } else {
-                        startService(intent)
+                        startService(serviceIntent)
                     }
                 },
                 onStopCapture = {
-                    stopService(
-                        Intent(this, ScreenCaptureService::class.java)
-                    )
+                    val stopIntent = Intent(
+                        this,
+                        ScreenCaptureService::class.java
+                    ).apply {
+                        action = ScreenCaptureService.ACTION_STOP
+                    }
+
+                    startService(stopIntent)
                 }
             )
         }
@@ -101,23 +106,28 @@ fun ChessVisionApp(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    var capturing by remember { mutableStateOf(false) }
-    var isDetecting by remember { mutableStateOf(false) }
+    var capturing by remember {
+        mutableStateOf(false)
+    }
 
-    var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var detectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var isDetecting by remember {
+        mutableStateOf(false)
+    }
 
-    var recognitionResult by remember {
-        mutableStateOf<PieceRecognitionResult?>(null)
+    var previewBitmap by remember {
+        mutableStateOf<Bitmap?>(null)
     }
 
     var message by remember {
         mutableStateOf("Ожидание захвата экрана")
     }
 
-    // Объект ведения шахматной партии.
-    val tracker = remember {
-        ChessGameTracker()
+    var trackerMessage by remember {
+        mutableStateOf("Ожидаю начальную позицию партии")
+    }
+
+    var engineMessage by remember {
+        mutableStateOf("Stockfish ожидает начала партии")
     }
 
     var gameStarted by remember {
@@ -132,21 +142,8 @@ fun ChessVisionApp(
         mutableStateOf<String?>(null)
     }
 
-    var trackerMessage by remember {
-        mutableStateOf("Ожидаю начальную позицию партии")
-    }
-
     var totalMoves by remember {
         mutableIntStateOf(0)
-    }
-
-    // Stockfish.
-    var lastNotifiedFen by remember {
-        mutableStateOf("")
-    }
-
-    var engineMessage by remember {
-        mutableStateOf("Stockfish ожидает начала партии")
     }
 
     var lastBestMove by remember {
@@ -161,12 +158,162 @@ fun ChessVisionApp(
         mutableStateOf("Уведомления ещё не проверялись")
     }
 
+    /*
+     * Получаем обновления от ScreenCaptureService.
+     * Вся обработка шахматной позиции теперь выполняется в сервисе.
+     */
+    DisposableEffect(context) {
+
+        val receiver = object : BroadcastReceiver() {
+
+            override fun onReceive(
+                receiverContext: Context?,
+                intent: Intent?
+            ) {
+                if (
+                    intent?.action !=
+                    ScreenCaptureService.ACTION_STATE_UPDATE
+                ) {
+                    return
+                }
+
+                message =
+                    intent.getStringExtra(
+                        ScreenCaptureService.EXTRA_MESSAGE
+                    ) ?: message
+
+                trackerMessage =
+                    intent.getStringExtra(
+                        ScreenCaptureService.EXTRA_TRACKER_MESSAGE
+                    ) ?: trackerMessage
+
+                engineMessage =
+                    intent.getStringExtra(
+                        ScreenCaptureService.EXTRA_ENGINE_MESSAGE
+                    ) ?: engineMessage
+
+                trackedFen =
+                    intent.getStringExtra(
+                        ScreenCaptureService.EXTRA_FEN
+                    )
+
+                trackedPlayerColor =
+                    intent.getStringExtra(
+                        ScreenCaptureService.EXTRA_PLAYER_COLOR
+                    )
+
+                gameStarted =
+                    intent.getBooleanExtra(
+                        ScreenCaptureService.EXTRA_GAME_STARTED,
+                        false
+                    )
+
+                totalMoves =
+                    intent.getIntExtra(
+                        ScreenCaptureService.EXTRA_TOTAL_MOVES,
+                        0
+                    )
+
+                lastBestMove =
+                    intent.getStringExtra(
+                        ScreenCaptureService.EXTRA_BEST_MOVE
+                    ) ?: ""
+
+                lastEvaluation =
+                    intent.getStringExtra(
+                        ScreenCaptureService.EXTRA_EVALUATION
+                    ) ?: ""
+
+                isDetecting =
+                    intent.getBooleanExtra(
+                        ScreenCaptureService.EXTRA_IS_DETECTING,
+                        false
+                    )
+            }
+        }
+
+        val filter = IntentFilter(
+            ScreenCaptureService.ACTION_STATE_UPDATE
+        )
+
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+
+        onDispose {
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /*
+     * Превью последнего кадра.
+     * Здесь нет распознавания доски и нет запуска Stockfish.
+     */
+    LaunchedEffect(capturing) {
+
+        if (!capturing) {
+            previewBitmap = null
+            return@LaunchedEffect
+        }
+
+        var lastSignature = ""
+
+        while (isActive) {
+
+            val file = File(
+                context.filesDir,
+                "last_screen_capture.png"
+            )
+
+            if (file.exists() && file.length() > 0) {
+
+                val signature =
+                    "${file.lastModified()}_${file.length()}"
+
+                if (signature != lastSignature) {
+
+                    lastSignature = signature
+
+                    val bitmap = withContext(Dispatchers.IO) {
+                        BitmapFactory.decodeFile(file.absolutePath)
+                    }
+
+                    if (bitmap != null) {
+                        previewBitmap = bitmap
+                    }
+                }
+            }
+
+            delay(1200)
+        }
+    }
+
     val captureLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
 
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+        if (
+            result.resultCode == Activity.RESULT_OK &&
+            result.data != null
+        ) {
+            trackedFen = null
+            trackedPlayerColor = null
+            gameStarted = false
+            totalMoves = 0
+            lastBestMove = ""
+            lastEvaluation = ""
+
+            trackerMessage = "Ожидаю начальную позицию партии"
+            engineMessage = "Stockfish ожидает начала партии"
+
             onStartCapture(result.resultCode, result.data)
+
             capturing = true
             message = "Захват запущен. Ищу доску..."
         } else {
@@ -174,355 +321,6 @@ fun ChessVisionApp(
         }
     }
 
-    // Распознавание доски и автоматическое ведение партии.
-    LaunchedEffect(capturing) {
-
-        if (!capturing) {
-            isDetecting = false
-            tracker.reset()
-
-            gameStarted = false
-            trackedFen = null
-            trackedPlayerColor = null
-            totalMoves = 0
-
-            trackerMessage = "Ожидаю начальную позицию партии"
-            engineMessage = "Stockfish ожидает начала партии"
-
-            return@LaunchedEffect
-        }
-
-        // При каждом новом захвате начинаем отслеживание заново.
-        tracker.reset()
-
-        gameStarted = false
-        trackedFen = null
-        trackedPlayerColor = null
-        totalMoves = 0
-        lastNotifiedFen = ""
-
-        var lastSignature = ""
-        var candidatePlacement = ""
-        var candidateCount = 0
-        var lastProcessedPlacement = ""
-
-        var recognizer: ChessPieceRecognizer? = null
-
-        try {
-            while (isActive) {
-
-                val file = File(
-                    context.filesDir,
-                    "last_screen_capture.png"
-                )
-
-                if (file.exists() && file.length() > 0) {
-
-                    val signature =
-                        "${file.lastModified()}_${file.length()}"
-
-                    if (signature != lastSignature) {
-
-                        lastSignature = signature
-
-                        val source = withContext(Dispatchers.IO) {
-                            BitmapFactory.decodeFile(file.absolutePath)
-                        }
-
-                        if (source != null) {
-
-                            previewBitmap = source
-                            isDetecting = true
-
-                            try {
-                                if (recognizer == null) {
-                                    recognizer = withContext(Dispatchers.IO) {
-                                        ChessPieceRecognizer(context)
-                                    }
-                                }
-
-                                val result = withContext(Dispatchers.Default) {
-
-                                    if (!ChessBoardDetector.initialize()) {
-                                        throw IllegalStateException(
-                                            "Ошибка инициализации OpenCV"
-                                        )
-                                    }
-
-                                    val bounds =
-                                        ChessBoardDetector.detect(source)
-
-                                    if (bounds == null) {
-                                        return@withContext Triple<
-                                            Bitmap?,
-                                            PieceRecognitionResult?,
-                                            String
-                                        >(
-                                            null,
-                                            null,
-                                            "Доска не найдена. Продолжаю поиск..."
-                                        )
-                                    }
-
-                                    val left = bounds.x.coerceIn(
-                                        0,
-                                        source.width - 1
-                                    )
-
-                                    val top = bounds.y.coerceIn(
-                                        0,
-                                        source.height - 1
-                                    )
-
-                                    val width = bounds.width.coerceAtMost(
-                                        source.width - left
-                                    )
-
-                                    val height = bounds.height.coerceAtMost(
-                                        source.height - top
-                                    )
-
-                                    if (width <= 0 || height <= 0) {
-                                        return@withContext Triple<
-                                            Bitmap?,
-                                            PieceRecognitionResult?,
-                                            String
-                                        >(
-                                            null,
-                                            null,
-                                            "Некорректные размеры доски"
-                                        )
-                                    }
-
-                                    val crop = Bitmap.createBitmap(
-                                        source,
-                                        left,
-                                        top,
-                                        width,
-                                        height
-                                    )
-
-                                    val recognized =
-                                        recognizer!!.recognize(crop)
-
-                                    Triple(
-                                        crop,
-                                        recognized,
-                                        "Позиция распознана"
-                                    )
-                                }
-
-                                detectedBitmap = result.first
-                                recognitionResult = result.second
-                                message = result.third
-
-                                val recognized = result.second
-
-                                // Для отслеживания используем только
-                                // надёжно распознанные позиции.
-                                if (
-                                    recognized == null ||
-                                    !recognized.reliable
-                                ) {
-                                    candidatePlacement = ""
-                                    candidateCount = 0
-
-                                } else {
-
-                                    val placement = recognized.placement
-
-                                    if (placement == candidatePlacement) {
-                                        candidateCount++
-                                    } else {
-                                        candidatePlacement = placement
-                                        candidateCount = 1
-                                    }
-
-                                    // Два одинаковых распознавания подряд.
-                                    if (
-                                        candidateCount >= 2 &&
-                                        placement != lastProcessedPlacement
-                                    ) {
-
-                                        lastProcessedPlacement = placement
-
-                                        val wasStarted = gameStarted
-
-                                        val outcome = withContext(
-                                            Dispatchers.Default
-                                        ) {
-                                            if (wasStarted) {
-                                                tracker.update(placement)
-                                            } else {
-                                                tracker.start(
-                                                    initialPlacement = placement,
-                                                    detectedPlayerColor =
-                                                        recognized.playerColor
-                                                )
-                                            }
-                                        }
-
-                                        trackerMessage = outcome.status
-
-                                        if (outcome.fen != null) {
-
-                                            trackedFen = outcome.fen
-
-                                            trackedPlayerColor =
-                                                outcome.playerColor
-                                                    ?: recognized.playerColor
-
-                                            if (!wasStarted) {
-                                                gameStarted = true
-                                                totalMoves = 0
-                                            } else if (outcome.advanced) {
-                                                totalMoves +=
-                                                    outcome.movesDetected
-                                            }
-
-                                        } else if (wasStarted) {
-
-                                            // Трекер обнаружил новую
-                                            // начальную позицию.
-                                            gameStarted = false
-                                            trackedFen = null
-                                            trackedPlayerColor = null
-                                            totalMoves = 0
-
-                                            lastProcessedPlacement = ""
-                                            candidateCount = 0
-                                        }
-                                    }
-                                }
-
-                            } catch (e: Exception) {
-                                message = "Ошибка: ${e.message}"
-                                recognitionResult = null
-                                detectedBitmap = null
-
-                                candidatePlacement = ""
-                                candidateCount = 0
-
-                            } finally {
-                                isDetecting = false
-                            }
-                        }
-                    }
-                }
-
-                delay(1000)
-            }
-
-        } finally {
-            withContext(Dispatchers.IO) {
-                recognizer?.close()
-            }
-        }
-    }
-
-    // Автоматический анализ Stockfish.
-    // Анализируем только тогда, когда очередь хода за игроком.
-    LaunchedEffect(
-        trackedFen,
-        trackedPlayerColor
-    ) {
-
-        val fen = trackedFen
-        val playerColor = trackedPlayerColor
-
-        if (!gameStarted || fen == null || playerColor == null) {
-            engineMessage = "Ожидаю подтверждённую партию"
-            return@LaunchedEffect
-        }
-
-        val fenParts = fen.trim().split(Regex("\\s+"))
-
-        if (fenParts.size < 6) {
-            engineMessage = "Некорректная FEN-запись"
-            return@LaunchedEffect
-        }
-
-        val sideToMove = fenParts[1]
-
-        if (sideToMove != playerColor) {
-            engineMessage = if (playerColor == "w") {
-                "Ход чёрных. Ожидаю ответ соперника..."
-            } else {
-                "Ход белых. Ожидаю ответ соперника..."
-            }
-
-            return@LaunchedEffect
-        }
-
-        if (fen == lastNotifiedFen) {
-            engineMessage = "Эта позиция уже проанализирована"
-            return@LaunchedEffect
-        }
-
-        // Небольшая задержка для стабилизации позиции.
-        delay(900)
-
-        if (
-            fen != trackedFen ||
-            playerColor != trackedPlayerColor
-        ) {
-            return@LaunchedEffect
-        }
-
-        try {
-            engineMessage = "Stockfish анализирует позицию..."
-
-            val result = withContext(Dispatchers.IO) {
-                StockfishEngine(context).use { engine ->
-                    engine.analyze(fen)
-                }
-            }
-
-            // Не отправляем устаревший результат.
-            if (
-                fen != trackedFen ||
-                playerColor != trackedPlayerColor
-            ) {
-                return@LaunchedEffect
-            }
-
-            if (
-                result.bestMove.isBlank() ||
-                result.bestMove == "(none)" ||
-                result.bestMove == "0000"
-            ) {
-                engineMessage = "Stockfish не нашёл доступный ход"
-                return@LaunchedEffect
-            }
-
-            engineMessage = "Отправляю лучший ход..."
-
-            val notificationStatus =
-                MoveNotifier.show(context, result)
-
-            lastBestMove =
-                MoveNotifier.formatMove(result.bestMove)
-
-            lastEvaluation = result.evaluation
-
-            if (notificationStatus == "Уведомление отправлено") {
-
-                lastNotifiedFen = fen
-
-                engineMessage =
-                    "Лучший ход отправлен. Глубина: ${result.depth}"
-
-            } else {
-                engineMessage = notificationStatus
-            }
-
-        } catch (e: Exception) {
-            engineMessage =
-                "Ошибка Stockfish: ${e.message ?: "неизвестная ошибка"}"
-        }
-    }
-
-    // Интерфейс приложения.
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -553,7 +351,20 @@ fun ChessVisionApp(
                 if (capturing) {
                     onStopCapture()
                     capturing = false
+
+                    gameStarted = false
+                    trackedFen = null
+                    trackedPlayerColor = null
+                    totalMoves = 0
+                    lastBestMove = ""
+                    lastEvaluation = ""
+
                     message = "Захват остановлен"
+                    trackerMessage =
+                        "Ожидаю начальную позицию партии"
+                    engineMessage =
+                        "Stockfish ожидает начала партии"
+
                 } else {
                     val manager = context.getSystemService(
                         Context.MEDIA_PROJECTION_SERVICE
@@ -579,15 +390,20 @@ fun ChessVisionApp(
             )
         ) {
             Text(
-                if (capturing) "ОСТАНОВИТЬ ЗАХВАТ"
-                else "НАЧАТЬ ЗАХВАТ",
+                if (capturing) {
+                    "ОСТАНОВИТЬ ЗАХВАТ"
+                } else {
+                    "НАЧАТЬ ЗАХВАТ"
+                },
                 fontWeight = FontWeight.Bold
             )
         }
 
         Spacer(Modifier.height(10.dp))
 
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Box(
                 Modifier
                     .size(9.dp)
@@ -600,8 +416,11 @@ fun ChessVisionApp(
             Spacer(Modifier.width(8.dp))
 
             Text(
-                if (capturing) "Захват активен"
-                else "Захват не запущен",
+                if (capturing) {
+                    "Захват и фоновый анализ активны"
+                } else {
+                    "Захват не запущен"
+                },
                 color = Color.LightGray
             )
         }
@@ -635,9 +454,9 @@ fun ChessVisionApp(
 
         SectionTitle("ПОСЛЕДНИЙ КАДР")
 
-        previewBitmap?.let {
+        previewBitmap?.let { bitmap ->
             Image(
-                bitmap = it.asImageBitmap(),
+                bitmap = bitmap.asImageBitmap(),
                 contentDescription = "Кадр экрана",
                 modifier = Modifier
                     .fillMaxWidth()
@@ -649,9 +468,11 @@ fun ChessVisionApp(
 
         Spacer(Modifier.height(22.dp))
 
-        SectionTitle("АВТОМАТИЧЕСКОЕ РАСПОЗНАВАНИЕ")
+        SectionTitle("ФОНОВОЕ РАСПОЗНАВАНИЕ")
 
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             if (isDetecting) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(18.dp),
@@ -669,108 +490,52 @@ fun ChessVisionApp(
             )
         }
 
-        detectedBitmap?.let {
-            Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(22.dp))
 
-            SectionTitle("ОБНАРУЖЕННАЯ ДОСКА")
+        SectionTitle("РАСПОЗНАННАЯ ПОЗИЦИЯ")
 
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1f)
-            ) {
-                Image(
-                    bitmap = it.asImageBitmap(),
-                    contentDescription = "Шахматная доска",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.FillBounds
-                )
+        val placement = trackedFen?.substringBefore(" ")
 
-                Canvas(Modifier.fillMaxSize()) {
-                    for (i in 1..7) {
-                        val x = size.width * i / 8f
-                        val y = size.height * i / 8f
-
-                        drawLine(
-                            Color.White.copy(alpha = 0.8f),
-                            Offset(x, 0f),
-                            Offset(x, size.height),
-                            1.dp.toPx()
-                        )
-
-                        drawLine(
-                            Color.White.copy(alpha = 0.8f),
-                            Offset(0f, y),
-                            Offset(size.width, y),
-                            1.dp.toPx()
-                        )
-                    }
-                }
-            }
-        }
-
-        recognitionResult?.let { result ->
-
-            Spacer(Modifier.height(22.dp))
-
-            SectionTitle("РАСПОЗНАННАЯ ПОЗИЦИЯ")
-
-            RecognizedBoard(result.placement)
+        if (gameStarted && placement != null) {
+            RecognizedBoard(placement)
 
             Spacer(Modifier.height(12.dp))
 
             Text(
-                "Средняя уверенность: ${
-                    String.format("%.1f", result.meanConfidence * 100)
-                }%",
-                color = Color.LightGray
+                "Позиция получена из истории ходов",
+                color = Color.LightGray,
+                fontSize = 12.sp
             )
-
-            Text(
-                "Минимальная уверенность: ${
-                    String.format("%.1f", result.minConfidence * 100)
-                }%",
-                color = Color.LightGray
+        } else {
+            InfoText(
+                "Доска появится после распознавания начальной позиции партии"
             )
+        }
 
-            Text(
-                if (result.reliable) {
-                    "Уверенность распознавания высокая"
-                } else {
-                    "Внимание: есть клетки с низкой уверенностью"
-                },
-                color = if (result.reliable) LimeColor
-                else Color(0xFFFFB45C),
-                fontSize = 13.sp
-            )
+        Spacer(Modifier.height(22.dp))
 
-            Spacer(Modifier.height(18.dp))
+        SectionTitle("ЦВЕТ ИГРОКА")
 
-            SectionTitle("ЦВЕТ ИГРОКА")
-
-            val colorText = when (result.playerColor) {
+        Text(
+            when (trackedPlayerColor) {
                 "w" -> "Вы играете белыми"
                 "b" -> "Вы играете чёрными"
                 else -> "Цвет игрока не определён"
-            }
+            },
+            color = LimeColor,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.Bold
+        )
 
-            Text(
-                colorText,
-                color = LimeColor,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.Bold
-            )
-
-            Text(
-                if (result.boardFlipped) {
-                    "Ориентация доски: чёрные снизу"
-                } else {
-                    "Ориентация доски: белые снизу"
-                },
-                color = Color.LightGray,
-                fontSize = 13.sp
-            )
-        }
+        Text(
+            when (trackedPlayerColor) {
+                "w" -> "Ориентация: белые снизу"
+                "b" -> "Ориентация: чёрные снизу"
+                else -> "Ориентация доски не определена"
+            },
+            color = Color.LightGray,
+            fontSize = 13.sp
+        )
 
         Spacer(Modifier.height(22.dp))
 
@@ -786,10 +551,16 @@ fun ChessVisionApp(
             ) {
 
                 Text(
-                    if (gameStarted) "ПАРТИЯ ОТСЛЕЖИВАЕТСЯ"
-                    else "ОЖИДАНИЕ НАЧАЛА ПАРТИИ",
-                    color = if (gameStarted) LimeColor
-                    else Color(0xFFFFB45C),
+                    if (gameStarted) {
+                        "ПАРТИЯ ОТСЛЕЖИВАЕТСЯ"
+                    } else {
+                        "ОЖИДАНИЕ НАЧАЛА ПАРТИИ"
+                    },
+                    color = if (gameStarted) {
+                        LimeColor
+                    } else {
+                        Color(0xFFFFB45C)
+                    },
                     fontWeight = FontWeight.Bold
                 )
 
@@ -834,7 +605,7 @@ fun ChessVisionApp(
 
         Spacer(Modifier.height(22.dp))
 
-        SectionTitle("STOCKFISH — АВТОМАТИЧЕСКИЙ АНАЛИЗ")
+        SectionTitle("STOCKFISH — ФОНОВЫЙ АНАЛИЗ")
 
         Surface(
             color = PanelBackground,
@@ -849,16 +620,16 @@ fun ChessVisionApp(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-    "✓",
-    color = LimeColor,
-    fontSize = 22.sp,
-    fontWeight = FontWeight.Bold
-)
+                        "✓",
+                        color = LimeColor,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold
+                    )
 
                     Spacer(Modifier.width(8.dp))
 
                     Text(
-                        "Автоматический режим активен",
+                        "Анализ выполняется в сервисе",
                         color = LimeColor,
                         fontWeight = FontWeight.Bold
                     )
@@ -908,9 +679,13 @@ fun ChessVisionApp(
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(
-                text = trackedFen ?: "FEN появится после подтверждения начала партии",
-                color = if (trackedFen != null) LimeColor
-                else Color(0xFFFFB45C),
+                text = trackedFen
+                    ?: "FEN появится после подтверждения начала партии",
+                color = if (trackedFen != null) {
+                    LimeColor
+                } else {
+                    Color(0xFFFFB45C)
+                },
                 fontSize = 14.sp,
                 modifier = Modifier.padding(14.dp)
             )
@@ -920,7 +695,7 @@ fun ChessVisionApp(
 
         Button(
             onClick = {
-                trackedFen?.let {
+                trackedFen?.let { fen ->
                     val clipboard =
                         context.getSystemService(
                             Context.CLIPBOARD_SERVICE
@@ -929,7 +704,7 @@ fun ChessVisionApp(
                     clipboard.setPrimaryClip(
                         android.content.ClipData.newPlainText(
                             "Chess FEN",
-                            it
+                            fen
                         )
                     )
                 }
@@ -1024,8 +799,11 @@ fun RecognizedBoard(placement: String) {
                             .weight(1f)
                             .fillMaxHeight()
                             .background(
-                                if (light) Color(0xFFEEEED2)
-                                else Color(0xFF769656)
+                                if (light) {
+                                    Color(0xFFEEEED2)
+                                } else {
+                                    Color(0xFF769656)
+                                }
                             ),
                         contentAlignment = Alignment.Center
                     ) {
