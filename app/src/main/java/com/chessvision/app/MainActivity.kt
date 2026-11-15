@@ -848,11 +848,12 @@ fun ChessVisionApp(
                 Row(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = androidx.compose.material.icons.Icons.Default.CheckCircle,
-                        contentDescription = null,
-                        tint = LimeColor
-                    )
+                    Text(
+    "✓",
+    color = LimeColor,
+    fontSize = 22.sp,
+    fontWeight = FontWeight.Bold
+)
 
                     Spacer(Modifier.width(8.dp))
 
