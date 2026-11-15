@@ -24,7 +24,8 @@ import kotlin.math.sin
 
 class ChessOverlayManager(
     context: Context,
-    private val onStop: () -> Unit
+    private val onStop: () -> Unit,
+    private val onSideToMoveSelected: (String) -> Unit = {}
 ) {
 
     private val appContext = context.applicationContext
@@ -37,10 +38,12 @@ class ChessOverlayManager(
     private var rootView: LinearLayout? = null
     private var arrowView: ChessArrowView? = null
 
+    private var contentView: LinearLayout? = null
     private var moveView: TextView? = null
     private var evaluationView: TextView? = null
     private var statusView: TextView? = null
     private var collapseButton: TextView? = null
+    private var turnSelectionView: LinearLayout? = null
 
     private var collapsed = false
 
@@ -65,6 +68,10 @@ class ChessOverlayManager(
             if (!hasPermission()) return@post
 
             if (rootView != null) {
+                if (arrowView == null) {
+                    createArrowLayer()
+                }
+
                 updateViews()
                 return@post
             }
@@ -125,6 +132,33 @@ class ChessOverlayManager(
         }
     }
 
+    /**
+     * Показывает запрос: чей сейчас ход.
+     */
+    fun showTurnSelection() {
+        mainHandler.post {
+            val content = contentView ?: return@post
+
+            collapsed = false
+            content.visibility = View.VISIBLE
+            collapseButton?.text = "—"
+
+            turnSelectionView?.visibility = View.VISIBLE
+
+            status = "Контекст партии потерян. Укажите очередь хода."
+            updateViews()
+        }
+    }
+
+    /**
+     * Убирает запрос выбора стороны.
+     */
+    fun hideTurnSelection() {
+        mainHandler.post {
+            turnSelectionView?.visibility = View.GONE
+        }
+    }
+
     fun hide() {
         mainHandler.post {
             val panel = rootView
@@ -146,10 +180,12 @@ class ChessOverlayManager(
 
             rootView = null
             arrowView = null
+            contentView = null
             moveView = null
             evaluationView = null
             statusView = null
             collapseButton = null
+            turnSelectionView = null
         }
     }
 
@@ -216,7 +252,7 @@ class ChessOverlayManager(
             text = "—"
             textSize = 22f
             gravity = Gravity.CENTER
-            setTextColor(0xFFFFFFFF.toInt())
+            setTextColor(Color.WHITE)
             setPadding(dp(12), 0, dp(4), 0)
         }
 
@@ -252,7 +288,7 @@ class ChessOverlayManager(
         val eval = createText(
             "Оценка: $evaluation",
             14f,
-            0xFFFFFFFF.toInt()
+            Color.WHITE
         )
 
         val statusText = createText(
@@ -266,17 +302,92 @@ class ChessOverlayManager(
         content.addView(eval)
         content.addView(statusText)
 
+        // Блок выбора очереди хода.
+        val turnSelection = LinearLayout(appContext).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(10), 0, 0)
+            visibility = View.GONE
+        }
+
+        val turnTitle = createText(
+            "КОНТЕКСТ ПАРТИИ ПОТЕРЯН",
+            12f,
+            0xFFFFD166.toInt(),
+            bold = true
+        )
+
+        val turnDescription = createText(
+            "Партия уже началась. Чей сейчас ход?",
+            12f,
+            Color.WHITE
+        )
+
+        turnSelection.addView(turnTitle)
+        turnSelection.addView(turnDescription)
+
+        val choices = LinearLayout(appContext).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        val whiteButton = createChoiceButton(
+            "ХОД БЕЛЫХ",
+            0xFF526B48.toInt()
+        ) {
+            onSideToMoveSelected("w")
+        }
+
+        val blackButton = createChoiceButton(
+            "ХОД ЧЁРНЫХ",
+            0xFF4B5265.toInt()
+        ) {
+            onSideToMoveSelected("b")
+        }
+
+        val choiceParams = LinearLayout.LayoutParams(
+            0,
+            dp(42),
+            1f
+        ).apply {
+            marginEnd = dp(4)
+        }
+
+        choices.addView(whiteButton, choiceParams)
+
+        val blackParams = LinearLayout.LayoutParams(
+            0,
+            dp(42),
+            1f
+        ).apply {
+            marginStart = dp(4)
+        }
+
+        choices.addView(blackButton, blackParams)
+
+        turnSelection.addView(
+            choices,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8)
+            }
+        )
+
+        content.addView(turnSelection)
+
         val stopButton = TextView(appContext).apply {
             text = "ОСТАНОВИТЬ АНАЛИЗ"
             textSize = 12f
             gravity = Gravity.CENTER
-            setTextColor(0xFFFFFFFF.toInt())
+            setTextColor(Color.WHITE)
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(dp(8), dp(10), dp(8), dp(10))
             background = roundedBackground(
                 color = 0xFF9B3939.toInt(),
                 radius = 9
             )
+
             setOnClickListener {
                 hide()
                 onStop()
@@ -293,11 +404,12 @@ class ChessOverlayManager(
         content.addView(stopButton, stopParams)
         root.addView(content)
 
-        // Сохраняем ссылки на элементы панели.
+        contentView = content
         moveView = move
         evaluationView = eval
         statusView = statusText
         collapseButton = collapse
+        turnSelectionView = turnSelection
 
         collapse.setOnClickListener {
             collapsed = !collapsed
@@ -311,7 +423,7 @@ class ChessOverlayManager(
             collapse.text = if (collapsed) "+" else "—"
         }
 
-        // Перемещение панели пальцем за заголовок.
+        // Перемещение панели за заголовок.
         title.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -372,6 +484,24 @@ class ChessOverlayManager(
         } catch (e: Exception) {
             rootView = null
             e.printStackTrace()
+        }
+    }
+
+    private fun createChoiceButton(
+        label: String,
+        color: Int,
+        onClick: () -> Unit
+    ): TextView {
+        return TextView(appContext).apply {
+            text = label
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            background = roundedBackground(color, 8)
+            setOnClickListener {
+                onClick()
+            }
         }
     }
 
