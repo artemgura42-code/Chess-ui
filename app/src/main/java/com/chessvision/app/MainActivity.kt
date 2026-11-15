@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -32,7 +31,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
@@ -51,7 +49,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Разрешение на уведомления Android 13+.
         if (
             Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -118,27 +115,38 @@ fun ChessVisionApp(
         mutableStateOf("Ожидание захвата экрана")
     }
 
-    // Параметры FEN.
-    var sideToMove by remember { mutableStateOf("w") }
+    // Объект ведения шахматной партии.
+    val tracker = remember {
+        ChessGameTracker()
+    }
 
-    var whiteKingSide by remember { mutableStateOf(false) }
-    var whiteQueenSide by remember { mutableStateOf(false) }
-    var blackKingSide by remember { mutableStateOf(false) }
-    var blackQueenSide by remember { mutableStateOf(false) }
+    var gameStarted by remember {
+        mutableStateOf(false)
+    }
 
-    var enPassant by remember { mutableStateOf("-") }
-    var halfmoveClock by remember { mutableStateOf("0") }
-    var fullmoveNumber by remember { mutableStateOf("1") }
+    var trackedFen by remember {
+        mutableStateOf<String?>(null)
+    }
 
-    // Настройки Stockfish.
-    var botMode by remember { mutableStateOf(false) }
+    var trackedPlayerColor by remember {
+        mutableStateOf<String?>(null)
+    }
 
+    var trackerMessage by remember {
+        mutableStateOf("Ожидаю начальную позицию партии")
+    }
+
+    var totalMoves by remember {
+        mutableIntStateOf(0)
+    }
+
+    // Stockfish.
     var lastNotifiedFen by remember {
         mutableStateOf("")
     }
 
     var engineMessage by remember {
-        mutableStateOf("Stockfish ожидает позицию")
+        mutableStateOf("Stockfish ожидает начала партии")
     }
 
     var lastBestMove by remember {
@@ -149,7 +157,6 @@ fun ChessVisionApp(
         mutableStateOf("")
     }
 
-    // Статус тестового уведомления.
     var notificationTestMessage by remember {
         mutableStateOf("Уведомления ещё не проверялись")
     }
@@ -167,15 +174,38 @@ fun ChessVisionApp(
         }
     }
 
-    // Автоматическое распознавание доски.
+    // Распознавание доски и автоматическое ведение партии.
     LaunchedEffect(capturing) {
 
         if (!capturing) {
             isDetecting = false
+            tracker.reset()
+
+            gameStarted = false
+            trackedFen = null
+            trackedPlayerColor = null
+            totalMoves = 0
+
+            trackerMessage = "Ожидаю начальную позицию партии"
+            engineMessage = "Stockfish ожидает начала партии"
+
             return@LaunchedEffect
         }
 
+        // При каждом новом захвате начинаем отслеживание заново.
+        tracker.reset()
+
+        gameStarted = false
+        trackedFen = null
+        trackedPlayerColor = null
+        totalMoves = 0
+        lastNotifiedFen = ""
+
         var lastSignature = ""
+        var candidatePlacement = ""
+        var candidateCount = 0
+        var lastProcessedPlacement = ""
+
         var recognizer: ChessPieceRecognizer? = null
 
         try {
@@ -286,10 +316,93 @@ fun ChessVisionApp(
                                 recognitionResult = result.second
                                 message = result.third
 
+                                val recognized = result.second
+
+                                // Для отслеживания используем только
+                                // надёжно распознанные позиции.
+                                if (
+                                    recognized == null ||
+                                    !recognized.reliable
+                                ) {
+                                    candidatePlacement = ""
+                                    candidateCount = 0
+
+                                } else {
+
+                                    val placement = recognized.placement
+
+                                    if (placement == candidatePlacement) {
+                                        candidateCount++
+                                    } else {
+                                        candidatePlacement = placement
+                                        candidateCount = 1
+                                    }
+
+                                    // Два одинаковых распознавания подряд.
+                                    if (
+                                        candidateCount >= 2 &&
+                                        placement != lastProcessedPlacement
+                                    ) {
+
+                                        lastProcessedPlacement = placement
+
+                                        val wasStarted = gameStarted
+
+                                        val outcome = withContext(
+                                            Dispatchers.Default
+                                        ) {
+                                            if (wasStarted) {
+                                                tracker.update(placement)
+                                            } else {
+                                                tracker.start(
+                                                    initialPlacement = placement,
+                                                    detectedPlayerColor =
+                                                        recognized.playerColor
+                                                )
+                                            }
+                                        }
+
+                                        trackerMessage = outcome.status
+
+                                        if (outcome.fen != null) {
+
+                                            trackedFen = outcome.fen
+
+                                            trackedPlayerColor =
+                                                outcome.playerColor
+                                                    ?: recognized.playerColor
+
+                                            if (!wasStarted) {
+                                                gameStarted = true
+                                                totalMoves = 0
+                                            } else if (outcome.advanced) {
+                                                totalMoves +=
+                                                    outcome.movesDetected
+                                            }
+
+                                        } else if (wasStarted) {
+
+                                            // Трекер обнаружил новую
+                                            // начальную позицию.
+                                            gameStarted = false
+                                            trackedFen = null
+                                            trackedPlayerColor = null
+                                            totalMoves = 0
+
+                                            lastProcessedPlacement = ""
+                                            candidateCount = 0
+                                        }
+                                    }
+                                }
+
                             } catch (e: Exception) {
                                 message = "Ошибка: ${e.message}"
                                 recognitionResult = null
                                 detectedBitmap = null
+
+                                candidatePlacement = ""
+                                candidateCount = 0
+
                             } finally {
                                 isDetecting = false
                             }
@@ -299,6 +412,7 @@ fun ChessVisionApp(
 
                 delay(1000)
             }
+
         } finally {
             withContext(Dispatchers.IO) {
                 recognizer?.close()
@@ -306,56 +420,37 @@ fun ChessVisionApp(
         }
     }
 
-    // Проверка игровых параметров FEN.
-    val halfmove = halfmoveClock.toIntOrNull()
-    val fullmove = fullmoveNumber.toIntOrNull()
-
-    val validEnPassant =
-        enPassant == "-" ||
-        enPassant.matches(Regex("[a-h][36]"))
-
-    val validCounters =
-        halfmove != null &&
-        halfmove >= 0 &&
-        fullmove != null &&
-        fullmove >= 1
-
-    val castling = buildString {
-        if (whiteKingSide) append("K")
-        if (whiteQueenSide) append("Q")
-        if (blackKingSide) append("k")
-        if (blackQueenSide) append("q")
-    }.ifEmpty { "-" }
-
-    val finalFen = recognitionResult?.let { recognized ->
-        if (validEnPassant && validCounters) {
-            "${recognized.placement} $sideToMove $castling " +
-                "$enPassant $halfmove $fullmove"
-        } else {
-            null
-        }
-    }
-
-    // Автоматический анализ новой позиции.
+    // Автоматический анализ Stockfish.
+    // Анализируем только тогда, когда очередь хода за игроком.
     LaunchedEffect(
-        botMode,
-        finalFen,
-        recognitionResult?.reliable
+        trackedFen,
+        trackedPlayerColor
     ) {
-        if (!botMode) {
-            engineMessage = "Режим Stockfish выключен"
+
+        val fen = trackedFen
+        val playerColor = trackedPlayerColor
+
+        if (!gameStarted || fen == null || playerColor == null) {
+            engineMessage = "Ожидаю подтверждённую партию"
             return@LaunchedEffect
         }
 
-        val fen = finalFen
+        val fenParts = fen.trim().split(Regex("\\s+"))
 
-        if (fen == null) {
-            engineMessage = "Ожидаю корректную FEN-позицию"
+        if (fenParts.size < 6) {
+            engineMessage = "Некорректная FEN-запись"
             return@LaunchedEffect
         }
 
-        if (recognitionResult?.reliable != true) {
-            engineMessage = "Низкая уверенность распознавания"
+        val sideToMove = fenParts[1]
+
+        if (sideToMove != playerColor) {
+            engineMessage = if (playerColor == "w") {
+                "Ход чёрных. Ожидаю ответ соперника..."
+            } else {
+                "Ход белых. Ожидаю ответ соперника..."
+            }
+
             return@LaunchedEffect
         }
 
@@ -364,11 +459,18 @@ fun ChessVisionApp(
             return@LaunchedEffect
         }
 
-        // Ожидаем стабилизации распознанной позиции.
-        delay(1200)
+        // Небольшая задержка для стабилизации позиции.
+        delay(900)
+
+        if (
+            fen != trackedFen ||
+            playerColor != trackedPlayerColor
+        ) {
+            return@LaunchedEffect
+        }
 
         try {
-            engineMessage = "Stockfish запускается..."
+            engineMessage = "Stockfish анализирует позицию..."
 
             val result = withContext(Dispatchers.IO) {
                 StockfishEngine(context).use { engine ->
@@ -376,8 +478,11 @@ fun ChessVisionApp(
                 }
             }
 
-            // Проверяем, что анализ всё ещё актуален.
-            if (!botMode || fen != finalFen) {
+            // Не отправляем устаревший результат.
+            if (
+                fen != trackedFen ||
+                playerColor != trackedPlayerColor
+            ) {
                 return@LaunchedEffect
             }
 
@@ -392,11 +497,9 @@ fun ChessVisionApp(
 
             engineMessage = "Отправляю лучший ход..."
 
-            // Отправляем уведомление.
             val notificationStatus =
                 MoveNotifier.show(context, result)
 
-            // Сохраняем красивую запись хода.
             lastBestMove =
                 MoveNotifier.formatMove(result.bestMove)
 
@@ -419,6 +522,7 @@ fun ChessVisionApp(
         }
     }
 
+    // Интерфейс приложения.
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -502,7 +606,6 @@ fun ChessVisionApp(
             )
         }
 
-        // Тест уведомлений.
         Spacer(Modifier.height(14.dp))
 
         Button(
@@ -555,6 +658,7 @@ fun ChessVisionApp(
                     color = LimeColor,
                     strokeWidth = 2.dp
                 )
+
                 Spacer(Modifier.width(10.dp))
             }
 
@@ -640,267 +744,206 @@ fun ChessVisionApp(
                 fontSize = 13.sp
             )
 
-            Spacer(Modifier.height(22.dp))
+            Spacer(Modifier.height(18.dp))
 
-            // Панель Stockfish.
-            SectionTitle("STOCKFISH 19 — АНАЛИЗ")
+            SectionTitle("ЦВЕТ ИГРОКА")
 
-            Surface(
-                color = PanelBackground,
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth()
+            val colorText = when (result.playerColor) {
+                "w" -> "Вы играете белыми"
+                "b" -> "Вы играете чёрными"
+                else -> "Цвет игрока не определён"
+            }
+
+            Text(
+                colorText,
+                color = LimeColor,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Text(
+                if (result.boardFlipped) {
+                    "Ориентация доски: чёрные снизу"
+                } else {
+                    "Ориентация доски: белые снизу"
+                },
+                color = Color.LightGray,
+                fontSize = 13.sp
+            )
+        }
+
+        Spacer(Modifier.height(22.dp))
+
+        SectionTitle("АВТОМАТИЧЕСКОЕ ВЕДЕНИЕ ПАРТИИ")
+
+        Surface(
+            color = PanelBackground,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp)
             ) {
-                Column(
-                    modifier = Modifier.padding(14.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(
-                                "Режим анализа",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold
-                            )
 
-                            Text(
-                                "Уведомления с лучшим ходом",
-                                color = Color.Gray,
-                                fontSize = 12.sp
-                            )
-                        }
-
-                        Switch(
-                            checked = botMode,
-                            onCheckedChange = { botMode = it },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = LimeColor,
-                                checkedTrackColor = Color(0xFF526B35)
-                            )
-                        )
-                    }
-
-                    Spacer(Modifier.height(10.dp))
-
-                    Text(
-                        engineMessage,
-                        color = LimeColor,
-                        fontSize = 13.sp
-                    )
-
-                    if (lastBestMove.isNotEmpty()) {
-                        Spacer(Modifier.height(12.dp))
-
-                        Text(
-                            "Последний лучший ход",
-                            color = Color.Gray,
-                            fontSize = 12.sp
-                        )
-
-                        Text(
-                            lastBestMove,
-                            color = LimeColor,
-                            fontSize = 25.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-
-                        Text(
-                            "Оценка: $lastEvaluation",
-                            color = Color.White,
-                            fontSize = 14.sp
-                        )
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(24.dp))
-
-            SectionTitle("ПАРАМЕТРЫ ПОЗИЦИИ FEN")
-
-            Text(
-                "Чей сейчас ход?",
-                color = Color.White,
-                fontWeight = FontWeight.Bold
-            )
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                RadioButton(
-                    selected = sideToMove == "w",
-                    onClick = { sideToMove = "w" },
-                    colors = RadioButtonDefaults.colors(
-                        selectedColor = LimeColor
-                    )
-                )
-                Text("Белые", color = Color.White)
-
-                Spacer(Modifier.width(20.dp))
-
-                RadioButton(
-                    selected = sideToMove == "b",
-                    onClick = { sideToMove = "b" },
-                    colors = RadioButtonDefaults.colors(
-                        selectedColor = LimeColor
-                    )
-                )
-                Text("Чёрные", color = Color.White)
-            }
-
-            Spacer(Modifier.height(12.dp))
-
-            Text(
-                "Права рокировки",
-                color = Color.White,
-                fontWeight = FontWeight.Bold
-            )
-
-            Text(
-                "Отметь только те права, которые сохранились в партии.",
-                color = Color.Gray,
-                fontSize = 12.sp
-            )
-
-            CastlingCheckbox(
-                "Белые: короткая (K)",
-                whiteKingSide
-            ) { whiteKingSide = it }
-
-            CastlingCheckbox(
-                "Белые: длинная (Q)",
-                whiteQueenSide
-            ) { whiteQueenSide = it }
-
-            CastlingCheckbox(
-                "Чёрные: короткая (k)",
-                blackKingSide
-            ) { blackKingSide = it }
-
-            CastlingCheckbox(
-                "Чёрные: длинная (q)",
-                blackQueenSide
-            ) { blackQueenSide = it }
-
-            Spacer(Modifier.height(12.dp))
-
-            Text(
-                "Взятие на проходе",
-                color = Color.White,
-                fontWeight = FontWeight.Bold
-            )
-
-            OutlinedTextField(
-                value = enPassant,
-                onValueChange = {
-                    enPassant = it.lowercase().take(2)
-                },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                placeholder = { Text("- или, например, e3") },
-                isError = !validEnPassant,
-                colors = fenFieldColors()
-            )
-
-            if (!validEnPassant) {
-                InfoText("Допустимы '-' или клетки e3/e6.")
-            }
-
-            Spacer(Modifier.height(12.dp))
-
-            Text(
-                "Счётчик полуходов",
-                color = Color.White,
-                fontWeight = FontWeight.Bold
-            )
-
-            OutlinedTextField(
-                value = halfmoveClock,
-                onValueChange = {
-                    halfmoveClock = it.filter(Char::isDigit).take(6)
-                },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Number
-                ),
-                colors = fenFieldColors()
-            )
-
-            Spacer(Modifier.height(12.dp))
-
-            Text(
-                "Номер полного хода",
-                color = Color.White,
-                fontWeight = FontWeight.Bold
-            )
-
-            OutlinedTextField(
-                value = fullmoveNumber,
-                onValueChange = {
-                    fullmoveNumber = it.filter(Char::isDigit).take(6)
-                },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Number
-                ),
-                colors = fenFieldColors()
-            )
-
-            if (!validCounters) {
-                InfoText(
-                    "Полуходы должны быть неотрицательными, номер хода — от 1."
-                )
-            }
-
-            Spacer(Modifier.height(22.dp))
-
-            SectionTitle("ПОЛНАЯ FEN-ЗАПИСЬ")
-
-            Surface(
-                color = PanelBackground,
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
                 Text(
-                    text = finalFen ?: "Проверь игровые параметры",
-                    color = if (finalFen != null) LimeColor
+                    if (gameStarted) "ПАРТИЯ ОТСЛЕЖИВАЕТСЯ"
+                    else "ОЖИДАНИЕ НАЧАЛА ПАРТИИ",
+                    color = if (gameStarted) LimeColor
                     else Color(0xFFFFB45C),
-                    fontSize = 14.sp,
-                    modifier = Modifier.padding(14.dp)
-                )
-            }
-
-            Spacer(Modifier.height(10.dp))
-
-            Button(
-                onClick = {
-                    finalFen?.let {
-                        val clipboard =
-                            context.getSystemService(
-                                Context.CLIPBOARD_SERVICE
-                            ) as android.content.ClipboardManager
-
-                        clipboard.setPrimaryClip(
-                            android.content.ClipData.newPlainText(
-                                "Chess FEN",
-                                it
-                            )
-                        )
-                    }
-                },
-                enabled = finalFen != null,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = LimeColor,
-                    contentColor = Color.Black
-                )
-            ) {
-                Text(
-                    "КОПИРОВАТЬ FEN",
                     fontWeight = FontWeight.Bold
                 )
+
+                Spacer(Modifier.height(10.dp))
+
+                Text(
+                    trackerMessage,
+                    color = Color.White,
+                    fontSize = 14.sp
+                )
+
+                Spacer(Modifier.height(12.dp))
+
+                Text(
+                    "Подтверждённых ходов: $totalMoves",
+                    color = Color.LightGray
+                )
+
+                Text(
+                    "Цвет игрока: ${
+                        when (trackedPlayerColor) {
+                            "w" -> "белые"
+                            "b" -> "чёрные"
+                            else -> "не определён"
+                        }
+                    }",
+                    color = Color.LightGray
+                )
+
+                Text(
+                    "Очередь хода: ${
+                        when (trackedFen?.split(" ")?.getOrNull(1)) {
+                            "w" -> "белые"
+                            "b" -> "чёрные"
+                            else -> "не определена"
+                        }
+                    }",
+                    color = Color.LightGray
+                )
             }
+        }
+
+        Spacer(Modifier.height(22.dp))
+
+        SectionTitle("STOCKFISH — АВТОМАТИЧЕСКИЙ АНАЛИЗ")
+
+        Surface(
+            color = PanelBackground,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp)
+            ) {
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = androidx.compose.material.icons.Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = LimeColor
+                    )
+
+                    Spacer(Modifier.width(8.dp))
+
+                    Text(
+                        "Автоматический режим активен",
+                        color = LimeColor,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                Text(
+                    engineMessage,
+                    color = Color.White,
+                    fontSize = 13.sp
+                )
+
+                if (lastBestMove.isNotEmpty()) {
+
+                    Spacer(Modifier.height(14.dp))
+
+                    Text(
+                        "Последний лучший ход",
+                        color = Color.Gray,
+                        fontSize = 12.sp
+                    )
+
+                    Text(
+                        lastBestMove,
+                        color = LimeColor,
+                        fontSize = 25.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Text(
+                        "Оценка: $lastEvaluation",
+                        color = Color.White,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(22.dp))
+
+        SectionTitle("ПОЛНАЯ FEN-ЗАПИСЬ")
+
+        Surface(
+            color = PanelBackground,
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = trackedFen ?: "FEN появится после подтверждения начала партии",
+                color = if (trackedFen != null) LimeColor
+                else Color(0xFFFFB45C),
+                fontSize = 14.sp,
+                modifier = Modifier.padding(14.dp)
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        Button(
+            onClick = {
+                trackedFen?.let {
+                    val clipboard =
+                        context.getSystemService(
+                            Context.CLIPBOARD_SERVICE
+                        ) as android.content.ClipboardManager
+
+                    clipboard.setPrimaryClip(
+                        android.content.ClipData.newPlainText(
+                            "Chess FEN",
+                            it
+                        )
+                    )
+                }
+            },
+            enabled = trackedFen != null,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = LimeColor,
+                contentColor = Color.Black
+            )
+        ) {
+            Text(
+                "КОПИРОВАТЬ FEN",
+                fontWeight = FontWeight.Bold
+            )
         }
 
         Spacer(Modifier.height(30.dp))
@@ -925,42 +968,6 @@ private fun InfoText(text: String) {
         fontSize = 12.sp
     )
 }
-
-@Composable
-private fun CastlingCheckbox(
-    label: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Checkbox(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = CheckboxDefaults.colors(
-                checkedColor = LimeColor,
-                checkmarkColor = Color.Black
-            )
-        )
-
-        Text(
-            label,
-            color = Color.White,
-            fontSize = 14.sp
-        )
-    }
-}
-
-@Composable
-private fun fenFieldColors() = OutlinedTextFieldDefaults.colors(
-    focusedTextColor = Color.White,
-    unfocusedTextColor = Color.White,
-    focusedBorderColor = LimeColor,
-    unfocusedBorderColor = Color.Gray,
-    cursorColor = LimeColor,
-    focusedLabelColor = LimeColor
-)
 
 @Composable
 fun RecognizedBoard(placement: String) {
