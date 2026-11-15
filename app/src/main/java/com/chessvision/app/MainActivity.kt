@@ -1,3 +1,4 @@
+
 package com.chessvision.app
 
 import android.Manifest
@@ -10,8 +11,10 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -64,6 +67,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             ChessVisionApp(
                 onStartCapture = { resultCode, data ->
+
                     val serviceIntent = Intent(
                         this,
                         ScreenCaptureService::class.java
@@ -84,7 +88,9 @@ class MainActivity : ComponentActivity() {
                         startService(serviceIntent)
                     }
                 },
+
                 onStopCapture = {
+
                     val stopIntent = Intent(
                         this,
                         ScreenCaptureService::class.java
@@ -154,13 +160,119 @@ fun ChessVisionApp(
         mutableStateOf("")
     }
 
-    var notificationTestMessage by remember {
-        mutableStateOf("Уведомления ещё не проверялись")
+    // Запоминаем, что пользователь собирался запустить захват,
+    // пока Android открывает настройки специального разрешения.
+    var pendingStartCapture by remember {
+        mutableStateOf(false)
+    }
+
+    /*
+     * Запрос разрешения MediaProjection.
+     * Вызывается только после проверки разрешения overlay.
+     */
+    val captureLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+
+        if (
+            result.resultCode == Activity.RESULT_OK &&
+            result.data != null
+        ) {
+            trackedFen = null
+            trackedPlayerColor = null
+            gameStarted = false
+            totalMoves = 0
+            lastBestMove = ""
+            lastEvaluation = ""
+
+            trackerMessage = "Ожидаю начальную позицию партии"
+            engineMessage = "Stockfish ожидает начала партии"
+
+            onStartCapture(
+                result.resultCode,
+                result.data
+            )
+
+            capturing = true
+            message = "Захват запущен. Ищу доску..."
+
+        } else {
+            capturing = false
+            message = "Не получено разрешение на захват экрана"
+        }
+    }
+
+    /*
+     * Возвращение из настроек Android после запроса
+     * разрешения на отображение поверх других приложений.
+     */
+    val overlayPermissionLauncher =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) {
+
+            pendingStartCapture = false
+
+            if (Settings.canDrawOverlays(context)) {
+
+                message =
+                    "Разрешение получено. Запрашиваю захват экрана..."
+
+                val manager = context.getSystemService(
+                    Context.MEDIA_PROJECTION_SERVICE
+                ) as MediaProjectionManager
+
+                captureLauncher.launch(
+                    manager.createScreenCaptureIntent()
+                )
+
+            } else {
+                message =
+                    "Разрешение на отображение поверх приложений не предоставлено"
+            }
+        }
+
+    /*
+     * Единая функция запуска.
+     * Сначала проверяем разрешение overlay,
+     * затем запрашиваем доступ к захвату экрана.
+     */
+    val requestCapture = {
+
+        if (capturing) {
+            Unit
+        } else if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            !Settings.canDrawOverlays(context)
+        ) {
+
+            pendingStartCapture = true
+
+            message =
+                "Предоставьте разрешение на отображение поверх приложений"
+
+            val settingsIntent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:${context.packageName}")
+            )
+
+            overlayPermissionLauncher.launch(settingsIntent)
+
+        } else {
+
+            val manager = context.getSystemService(
+                Context.MEDIA_PROJECTION_SERVICE
+            ) as MediaProjectionManager
+
+            captureLauncher.launch(
+                manager.createScreenCaptureIntent()
+            )
+        }
     }
 
     /*
      * Получаем обновления от ScreenCaptureService.
-     * Вся обработка шахматной позиции теперь выполняется в сервисе.
+     * Вся обработка шахматной позиции выполняется в сервисе.
      */
     DisposableEffect(context) {
 
@@ -253,7 +365,7 @@ fun ChessVisionApp(
 
     /*
      * Превью последнего кадра.
-     * Здесь нет распознавания доски и нет запуска Stockfish.
+     * Здесь нет распознавания доски и запуска Stockfish.
      */
     LaunchedEffect(capturing) {
 
@@ -294,33 +406,6 @@ fun ChessVisionApp(
         }
     }
 
-    val captureLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-
-        if (
-            result.resultCode == Activity.RESULT_OK &&
-            result.data != null
-        ) {
-            trackedFen = null
-            trackedPlayerColor = null
-            gameStarted = false
-            totalMoves = 0
-            lastBestMove = ""
-            lastEvaluation = ""
-
-            trackerMessage = "Ожидаю начальную позицию партии"
-            engineMessage = "Stockfish ожидает начала партии"
-
-            onStartCapture(result.resultCode, result.data)
-
-            capturing = true
-            message = "Захват запущен. Ищу доску..."
-        } else {
-            message = "Не получено разрешение на захват экрана"
-        }
-    }
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -348,8 +433,11 @@ fun ChessVisionApp(
 
         Button(
             onClick = {
+
                 if (capturing) {
+
                     onStopCapture()
+
                     capturing = false
 
                     gameStarted = false
@@ -360,28 +448,27 @@ fun ChessVisionApp(
                     lastEvaluation = ""
 
                     message = "Захват остановлен"
+
                     trackerMessage =
                         "Ожидаю начальную позицию партии"
+
                     engineMessage =
                         "Stockfish ожидает начала партии"
 
                 } else {
-                    val manager = context.getSystemService(
-                        Context.MEDIA_PROJECTION_SERVICE
-                    ) as MediaProjectionManager
-
-                    captureLauncher.launch(
-                        manager.createScreenCaptureIntent()
-                    )
+                    requestCapture()
                 }
             },
+
             modifier = Modifier.fillMaxWidth(),
+
             colors = ButtonDefaults.buttonColors(
                 containerColor = if (capturing) {
                     Color(0xFF9B3939)
                 } else {
                     LimeColor
                 },
+
                 contentColor = if (capturing) {
                     Color.White
                 } else {
@@ -427,26 +514,23 @@ fun ChessVisionApp(
 
         Spacer(Modifier.height(14.dp))
 
-        Button(
-            onClick = {
-                notificationTestMessage =
-                    MoveNotifier.showTest(context)
-            },
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = LimeColor,
-                contentColor = Color.Black
-            )
-        ) {
-            Text(
-                "ПРОВЕРИТЬ УВЕДОМЛЕНИЯ",
-                fontWeight = FontWeight.Bold
-            )
-        }
-
         Text(
-            notificationTestMessage,
-            color = Color.LightGray,
+            text = if (
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+                Settings.canDrawOverlays(context)
+            ) {
+                "✓ Разрешение плавающей панели предоставлено"
+            } else {
+                "Для работы плавающей панели потребуется разрешение Android"
+            },
+            color = if (
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+                Settings.canDrawOverlays(context)
+            ) {
+                LimeColor
+            } else {
+                Color(0xFFFFB45C)
+            },
             fontSize = 12.sp
         )
 
@@ -455,6 +539,7 @@ fun ChessVisionApp(
         SectionTitle("ПОСЛЕДНИЙ КАДР")
 
         previewBitmap?.let { bitmap ->
+
             Image(
                 bitmap = bitmap.asImageBitmap(),
                 contentDescription = "Кадр экрана",
@@ -464,6 +549,7 @@ fun ChessVisionApp(
                     .background(Color.Black),
                 contentScale = ContentScale.Fit
             )
+
         } ?: InfoText("Здесь появится изображение экрана")
 
         Spacer(Modifier.height(22.dp))
@@ -473,6 +559,7 @@ fun ChessVisionApp(
         Row(
             verticalAlignment = Alignment.CenterVertically
         ) {
+
             if (isDetecting) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(18.dp),
@@ -497,6 +584,7 @@ fun ChessVisionApp(
         val placement = trackedFen?.substringBefore(" ")
 
         if (gameStarted && placement != null) {
+
             RecognizedBoard(placement)
 
             Spacer(Modifier.height(12.dp))
@@ -506,7 +594,9 @@ fun ChessVisionApp(
                 color = Color.LightGray,
                 fontSize = 12.sp
             )
+
         } else {
+
             InfoText(
                 "Доска появится после распознавания начальной позиции партии"
             )
@@ -619,6 +709,7 @@ fun ChessVisionApp(
                 Row(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+
                     Text(
                         "✓",
                         color = LimeColor,
@@ -681,11 +772,13 @@ fun ChessVisionApp(
             Text(
                 text = trackedFen
                     ?: "FEN появится после подтверждения начала партии",
+
                 color = if (trackedFen != null) {
                     LimeColor
                 } else {
                     Color(0xFFFFB45C)
                 },
+
                 fontSize = 14.sp,
                 modifier = Modifier.padding(14.dp)
             )
@@ -695,7 +788,9 @@ fun ChessVisionApp(
 
         Button(
             onClick = {
+
                 trackedFen?.let { fen ->
+
                     val clipboard =
                         context.getSystemService(
                             Context.CLIPBOARD_SERVICE
@@ -709,8 +804,11 @@ fun ChessVisionApp(
                     )
                 }
             },
+
             enabled = trackedFen != null,
+
             modifier = Modifier.fillMaxWidth(),
+
             colors = ButtonDefaults.buttonColors(
                 containerColor = LimeColor,
                 contentColor = Color.Black
@@ -770,11 +868,13 @@ fun RecognizedBoard(placement: String) {
             .fillMaxWidth()
             .aspectRatio(1f)
     ) {
+
         rows.take(8).forEachIndexed { rowIndex, row ->
 
             val cells = mutableListOf<Char>()
 
             row.forEach { character ->
+
                 if (character.isDigit()) {
                     repeat(character.digitToInt()) {
                         cells.add('.')
@@ -789,10 +889,13 @@ fun RecognizedBoard(placement: String) {
                     .fillMaxWidth()
                     .weight(1f)
             ) {
+
                 (0 until 8).forEach { columnIndex ->
 
                     val piece = cells.getOrElse(columnIndex) { '.' }
-                    val light = (rowIndex + columnIndex) % 2 == 0
+
+                    val light =
+                        (rowIndex + columnIndex) % 2 == 0
 
                     Box(
                         modifier = Modifier
@@ -805,12 +908,16 @@ fun RecognizedBoard(placement: String) {
                                     Color(0xFF769656)
                                 }
                             ),
+
                         contentAlignment = Alignment.Center
                     ) {
+
                         if (piece != '.') {
+
                             Text(
                                 text = symbols[piece] ?: "",
                                 fontSize = 25.sp,
+
                                 color = if (piece.isUpperCase()) {
                                     Color.White
                                 } else {
