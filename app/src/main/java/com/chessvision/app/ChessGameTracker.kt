@@ -14,10 +14,7 @@ data class ChessTrackerResult(
 class ChessGameTracker {
 
     companion object {
-        // Ищем позицию на глубине до 12 полуходов.
         private const val MAX_SEARCH_DEPTH = 12
-
-        // Сохраняем 256 наиболее перспективных вариантов на каждом уровне.
         private const val BEAM_WIDTH = 256
 
         const val START_PLACEMENT =
@@ -44,8 +41,8 @@ class ChessGameTracker {
     /**
      * Начинает отслеживание.
      *
-     * Теперь допускается первое распознавание не только
-     * начальной позиции, но и позиции после нескольких ходов.
+     * Сначала пытается восстановить позицию поиском легальных ходов
+     * от начальной расстановки.
      */
     @Synchronized
     fun start(
@@ -85,7 +82,7 @@ class ChessGameTracker {
             return ChessTrackerResult(
                 null,
                 null,
-                "Позиция найдена, но не удалось восстановить историю ходов. Продолжаю наблюдение",
+                "Историю партии восстановить не удалось",
                 false,
                 0
             )
@@ -97,9 +94,9 @@ class ChessGameTracker {
 
         val status = if (found.path.isEmpty()) {
             if (detectedPlayerColor == "w") {
-                "Партия начата. Вы играете белыми"
+                "Новая партия. Вы играете белыми"
             } else {
-                "Партия начата. Вы играете чёрными"
+                "Новая партия. Вы играете чёрными"
             }
         } else {
             val colorText = if (detectedPlayerColor == "w") {
@@ -118,6 +115,89 @@ class ChessGameTracker {
             advanced = true,
             movesDetected = found.path.size
         )
+    }
+
+    /**
+     * Восстанавливает позицию без истории партии.
+     *
+     * sideToMove — чей сейчас ход: "w" или "b".
+     *
+     * Права на рокировку и взятие на проходе неизвестны,
+     * поэтому они намеренно сбрасываются.
+     */
+    @Synchronized
+    fun startFromPosition(
+        initialPlacement: String,
+        detectedPlayerColor: String,
+        sideToMove: String
+    ): ChessTrackerResult {
+
+        if (
+            detectedPlayerColor != "w" &&
+            detectedPlayerColor != "b"
+        ) {
+            return ChessTrackerResult(
+                null,
+                null,
+                "Не удалось определить цвет игрока",
+                false,
+                0
+            )
+        }
+
+        if (sideToMove != "w" && sideToMove != "b") {
+            return ChessTrackerResult(
+                null,
+                null,
+                "Не удалось определить очередь хода",
+                false,
+                0
+            )
+        }
+
+        return try {
+            val recoveredBoard = Board()
+
+            // История партии неизвестна:
+            // рокировка и en passant отключены.
+            val recoveredFen =
+                "$initialPlacement $sideToMove - - 0 1"
+
+            recoveredBoard.loadFromFen(recoveredFen)
+
+            board = recoveredBoard
+            playerColor = detectedPlayerColor
+            lastPlacement = initialPlacement
+
+            val sideText = if (sideToMove == "w") {
+                "белых"
+            } else {
+                "чёрных"
+            }
+
+            val playerText = if (detectedPlayerColor == "w") {
+                "белыми"
+            } else {
+                "чёрными"
+            }
+
+            ChessTrackerResult(
+                fen = recoveredBoard.fen,
+                playerColor = detectedPlayerColor,
+                status = "Позиция восстановлена без истории партии. Ход $sideText. Вы играете $playerText",
+                advanced = false,
+                movesDetected = 0
+            )
+
+        } catch (e: Exception) {
+            ChessTrackerResult(
+                null,
+                null,
+                "Не удалось создать позицию: ${e.message}",
+                false,
+                0
+            )
+        }
     }
 
     @Synchronized
@@ -153,7 +233,7 @@ class ChessGameTracker {
             return ChessTrackerResult(
                 null,
                 null,
-                "Обнаружена новая начальная позиция. Ожидаю начала партии",
+                "Обнаружена новая начальная позиция",
                 false,
                 0
             )
@@ -166,9 +246,9 @@ class ChessGameTracker {
 
         if (found == null) {
             return ChessTrackerResult(
-                currentBoard.fen,
+                null,
                 playerColor,
-                "Не удалось подтвердить легальную последовательность ходов",
+                "Контекст партии потерян. Не удалось подтвердить последовательность ходов",
                 false,
                 0
             )
@@ -234,7 +314,6 @@ class ChessGameTracker {
 
                     val path = node.path + move.toString()
 
-                    // Если нашли точное совпадение — возвращаем позицию.
                     if (placement == targetPlacement) {
                         return SearchNode(
                             board = nextBoard,
@@ -274,10 +353,6 @@ class ChessGameTracker {
         return null
     }
 
-    /**
-     * Считает количество различающихся клеток.
-     * Чем меньше число, тем ближе позиция к распознанной.
-     */
     private fun difference(
         first: String,
         second: String
@@ -297,9 +372,6 @@ class ChessGameTracker {
         return differences
     }
 
-    /**
-     * Преобразует FEN placement в массив из 64 клеток.
-     */
     private fun expandPlacement(
         placement: String
     ): CharArray? {
@@ -344,7 +416,6 @@ class ChessGameTracker {
                 }
             }
 
-            // В каждой строке FEN должно быть ровно 8 клеток.
             if (index - rowStart != 8) {
                 return null
             }
