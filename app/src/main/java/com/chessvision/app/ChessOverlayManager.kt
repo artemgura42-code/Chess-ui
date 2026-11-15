@@ -2,6 +2,10 @@
 package com.chessvision.app
 
 import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.provider.Settings
@@ -14,6 +18,9 @@ import android.widget.TextView
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 
 class ChessOverlayManager(
     context: Context,
@@ -28,7 +35,7 @@ class ChessOverlayManager(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var rootView: LinearLayout? = null
-    private var contentView: LinearLayout? = null
+    private var arrowView: ChessArrowView? = null
 
     private var moveView: TextView? = null
     private var evaluationView: TextView? = null
@@ -38,10 +45,16 @@ class ChessOverlayManager(
     private var collapsed = false
 
     private lateinit var layoutParams: WindowManager.LayoutParams
+    private lateinit var arrowLayoutParams: WindowManager.LayoutParams
 
     private var bestMove = "Ожидание хода..."
     private var evaluation = ""
     private var status = "Stockfish ожидает позицию"
+
+    private var initialX = 0
+    private var initialY = 0
+    private var initialTouchX = 0f
+    private var initialTouchY = 0f
 
     fun hasPermission(): Boolean {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
@@ -57,6 +70,7 @@ class ChessOverlayManager(
                 return@post
             }
 
+            createArrowLayer()
             createPanel()
         }
     }
@@ -75,21 +89,121 @@ class ChessOverlayManager(
         }
     }
 
+    /**
+     * Показывает стрелку на доске.
+     *
+     * move: ход Stockfish в формате UCI, например e2e4.
+     * boardLeft / boardTop: координаты левого верхнего угла доски.
+     * boardWidth / boardHeight: размеры доски в пикселях.
+     * whiteAtBottom: true, если белые фигуры находятся снизу.
+     */
+    fun updateArrow(
+        move: String,
+        boardLeft: Int,
+        boardTop: Int,
+        boardWidth: Int,
+        boardHeight: Int,
+        whiteAtBottom: Boolean
+    ) {
+        mainHandler.post {
+            val view = arrowView ?: return@post
+
+            if (
+                move.length < 4 ||
+                boardWidth <= 0 ||
+                boardHeight <= 0
+            ) {
+                view.clearArrow()
+                return@post
+            }
+
+            view.setArrow(
+                move = move,
+                boardLeft = boardLeft.toFloat(),
+                boardTop = boardTop.toFloat(),
+                boardWidth = boardWidth.toFloat(),
+                boardHeight = boardHeight.toFloat(),
+                whiteAtBottom = whiteAtBottom
+            )
+        }
+    }
+
+    /**
+     * Убирает стрелку с экрана.
+     */
+    fun clearArrow() {
+        mainHandler.post {
+            arrowView?.clearArrow()
+        }
+    }
+
     fun hide() {
         mainHandler.post {
-            val view = rootView ?: return@post
+            val panel = rootView
+            val arrow = arrowView
 
             try {
-                windowManager.removeView(view)
+                if (panel != null) {
+                    windowManager.removeView(panel)
+                }
+            } catch (_: Exception) {
+            }
+
+            try {
+                if (arrow != null) {
+                    windowManager.removeView(arrow)
+                }
             } catch (_: Exception) {
             }
 
             rootView = null
-            contentView = null
+            arrowView = null
             moveView = null
             evaluationView = null
             statusView = null
             collapseButton = null
+        }
+    }
+
+    /**
+     * Прозрачный полноэкранный слой.
+     * FLAG_NOT_TOUCHABLE гарантирует, что он не мешает нажимать
+     * на клетки шахматной доски.
+     */
+    private fun createArrowLayer() {
+        if (arrowView != null || !hasPermission()) return
+
+        val view = ChessArrowView(appContext)
+
+        val windowType =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_PHONE
+            }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            windowType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+        }
+
+        try {
+            windowManager.addView(view, params)
+            arrowView = view
+            arrowLayoutParams = params
+        } catch (e: Exception) {
+            e.printStackTrace()
+            arrowView = null
         }
     }
 
@@ -279,11 +393,6 @@ class ChessOverlayManager(
         }
     }
 
-    private var initialX = 0
-    private var initialY = 0
-    private var initialTouchX = 0f
-    private var initialTouchY = 0f
-
     private fun updateViews() {
         moveView?.text = bestMove.ifBlank {
             "Ожидание хода..."
@@ -328,6 +437,147 @@ class ChessOverlayManager(
     }
 
     private fun dp(value: Int): Int {
-        return (value * appContext.resources.displayMetrics.density).toInt()
+        return (
+            value * appContext.resources.displayMetrics.density
+        ).toInt()
+    }
+
+    /**
+     * Отдельный View, рисующий стрелку поверх экрана.
+     */
+    private inner class ChessArrowView(
+        context: Context
+    ) : View(context) {
+
+        private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(90, 220, 75)
+            style = Paint.Style.STROKE
+            strokeWidth = dp(6).toFloat()
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+
+        private val headPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(90, 220, 75)
+            style = Paint.Style.FILL
+        }
+
+        private var move: String? = null
+        private var boardLeft = 0f
+        private var boardTop = 0f
+        private var boardWidth = 0f
+        private var boardHeight = 0f
+        private var whiteAtBottom = true
+
+        fun setArrow(
+            move: String,
+            boardLeft: Float,
+            boardTop: Float,
+            boardWidth: Float,
+            boardHeight: Float,
+            whiteAtBottom: Boolean
+        ) {
+            this.move = move
+            this.boardLeft = boardLeft
+            this.boardTop = boardTop
+            this.boardWidth = boardWidth
+            this.boardHeight = boardHeight
+            this.whiteAtBottom = whiteAtBottom
+            invalidate()
+        }
+
+        fun clearArrow() {
+            move = null
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+
+            val currentMove = move ?: return
+
+            if (currentMove.length < 4) return
+            if (boardWidth <= 0f || boardHeight <= 0f) return
+
+            val fromFile = currentMove[0] - 'a'
+            val fromRank = currentMove[1] - '1'
+            val toFile = currentMove[2] - 'a'
+            val toRank = currentMove[3] - '1'
+
+            if (
+                fromFile !in 0..7 ||
+                fromRank !in 0..7 ||
+                toFile !in 0..7 ||
+                toRank !in 0..7
+            ) {
+                return
+            }
+
+            val squareWidth = boardWidth / 8f
+            val squareHeight = boardHeight / 8f
+
+            val fromColumn: Int
+            val fromRow: Int
+            val toColumn: Int
+            val toRow: Int
+
+            if (whiteAtBottom) {
+                fromColumn = fromFile
+                fromRow = 7 - fromRank
+
+                toColumn = toFile
+                toRow = 7 - toRank
+            } else {
+                fromColumn = 7 - fromFile
+                fromRow = fromRank
+
+                toColumn = 7 - toFile
+                toRow = toRank
+            }
+
+            val startX =
+                boardLeft + (fromColumn + 0.5f) * squareWidth
+            val startY =
+                boardTop + (fromRow + 0.5f) * squareHeight
+
+            val endX =
+                boardLeft + (toColumn + 0.5f) * squareWidth
+            val endY =
+                boardTop + (toRow + 0.5f) * squareHeight
+
+            val angle = atan2(
+                (endY - startY).toDouble(),
+                (endX - startX).toDouble()
+            )
+
+            val arrowLength = dp(23).toFloat()
+            val arrowAngle = Math.toRadians(30.0)
+
+            val path = Path().apply {
+                moveTo(startX, startY)
+                lineTo(endX, endY)
+            }
+
+            canvas.drawPath(path, arrowPaint)
+
+            val leftX = endX -
+                arrowLength * cos(angle - arrowAngle).toFloat()
+            val leftY = endY -
+                arrowLength * sin(angle - arrowAngle).toFloat()
+
+            val rightX = endX -
+                arrowLength * cos(angle + arrowAngle).toFloat()
+            val rightY = endY -
+                arrowLength * sin(angle + arrowAngle).toFloat()
+
+            val head = Path().apply {
+                moveTo(endX, endY)
+                lineTo(leftX, leftY)
+                lineTo(rightX, rightY)
+                close()
+            }
+
+            canvas.drawPath(head, headPaint)
+        }
     }
 }
