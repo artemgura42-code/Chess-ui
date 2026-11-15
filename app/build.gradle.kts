@@ -18,6 +18,12 @@ packaging {
     jniLibs {
         useLegacyPackaging = true
     }
+packaging {
+    jniLibs {
+        useLegacyPackaging = true
+        keepDebugSymbols += "**/libstockfish.so"
+    }
+}
 }
     }
 
