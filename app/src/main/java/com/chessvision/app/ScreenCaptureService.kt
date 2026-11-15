@@ -21,6 +21,8 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
+import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -59,6 +61,7 @@ class ScreenCaptureService : Service() {
         private const val NOTIFICATION_ID = 1001
 
         private const val FRAME_INTERVAL_MS = 300L
+        private const val FRAME_SAVE_INTERVAL_MS = 1000L
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -69,8 +72,12 @@ class ScreenCaptureService : Service() {
 
     private val processingExecutor = Executors.newSingleThreadExecutor()
     private val engineExecutor = Executors.newSingleThreadExecutor()
+    private val frameSaveExecutor = Executors.newSingleThreadExecutor()
 
     private val frameProcessing = AtomicBoolean(false)
+    private val frameSaving = AtomicBoolean(false)
+
+    private var lastFrameSaveQueuedAt = 0L
 
     private var recognizer: ChessPieceRecognizer? = null
     private val tracker = ChessGameTracker()
@@ -310,6 +317,9 @@ class ScreenCaptureService : Service() {
             return
         }
 
+        // Сохраняем отдельную копию кадра, не задерживая распознавание.
+        saveFrameAsync(bitmap, now)
+
         try {
             processingExecutor.execute {
                 try {
@@ -335,6 +345,64 @@ class ScreenCaptureService : Service() {
             }
 
             frameProcessing.set(false)
+        }
+    }
+
+    private fun saveFrameAsync(bitmap: Bitmap, now: Long) {
+        if (now - lastFrameSaveQueuedAt < FRAME_SAVE_INTERVAL_MS) {
+            return
+        }
+
+        if (!frameSaving.compareAndSet(false, true)) {
+            return
+        }
+
+        lastFrameSaveQueuedAt = now
+
+        val copy = try {
+            bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+
+        if (copy == null) {
+            frameSaving.set(false)
+            return
+        }
+
+        try {
+            frameSaveExecutor.execute {
+                try {
+                    saveFrame(copy)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                } finally {
+                    if (!copy.isRecycled) {
+                        copy.recycle()
+                    }
+
+                    frameSaving.set(false)
+                }
+            }
+        } catch (e: Exception) {
+            if (!copy.isRecycled) {
+                copy.recycle()
+            }
+
+            frameSaving.set(false)
+        }
+    }
+
+    private fun saveFrame(bitmap: Bitmap) {
+        val file = File(filesDir, "last_screen_capture.png")
+
+        FileOutputStream(file).use { output ->
+            bitmap.compress(
+                Bitmap.CompressFormat.PNG,
+                100,
+                output
+            )
         }
     }
 
@@ -923,6 +991,9 @@ class ScreenCaptureService : Service() {
 
         processingExecutor.shutdownNow()
         engineExecutor.shutdownNow()
+
+        // Даём текущей записи кадра завершиться.
+        frameSaveExecutor.shutdown()
 
         try {
             recognizer?.close()
