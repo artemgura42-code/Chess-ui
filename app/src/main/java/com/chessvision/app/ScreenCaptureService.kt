@@ -21,9 +21,8 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
-import java.io.File
-import java.io.FileOutputStream
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class ScreenCaptureService : Service() {
 
@@ -59,7 +58,7 @@ class ScreenCaptureService : Service() {
         private const val CHANNEL_ID = "chess_capture_channel"
         private const val NOTIFICATION_ID = 1001
 
-        private const val FRAME_INTERVAL_MS = 1000L
+        private const val FRAME_INTERVAL_MS = 300L
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -70,6 +69,8 @@ class ScreenCaptureService : Service() {
 
     private val processingExecutor = Executors.newSingleThreadExecutor()
     private val engineExecutor = Executors.newSingleThreadExecutor()
+
+    private val frameProcessing = AtomicBoolean(false)
 
     private var recognizer: ChessPieceRecognizer? = null
     private val tracker = ChessGameTracker()
@@ -280,7 +281,18 @@ class ScreenCaptureService : Service() {
             return
         }
 
-        val image = reader.acquireLatestImage() ?: return
+        if (!frameProcessing.compareAndSet(false, true)) {
+            val skipped = reader.acquireLatestImage()
+            skipped?.close()
+            return
+        }
+
+        val image = reader.acquireLatestImage()
+
+        if (image == null) {
+            frameProcessing.set(false)
+            return
+        }
 
         lastQueuedAt = now
 
@@ -293,12 +305,14 @@ class ScreenCaptureService : Service() {
             image.close()
         }
 
-        if (bitmap == null) return
+        if (bitmap == null) {
+            frameProcessing.set(false)
+            return
+        }
 
         try {
             processingExecutor.execute {
                 try {
-                    saveFrame(bitmap)
                     processFrame(bitmap)
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -311,12 +325,16 @@ class ScreenCaptureService : Service() {
                     if (!bitmap.isRecycled) {
                         bitmap.recycle()
                     }
+
+                    frameProcessing.set(false)
                 }
             }
         } catch (e: Exception) {
             if (!bitmap.isRecycled) {
                 bitmap.recycle()
             }
+
+            frameProcessing.set(false)
         }
     }
 
@@ -352,18 +370,6 @@ class ScreenCaptureService : Service() {
         }
 
         return result
-    }
-
-    private fun saveFrame(bitmap: Bitmap) {
-        val file = File(filesDir, "last_screen_capture.png")
-
-        FileOutputStream(file).use { output ->
-            bitmap.compress(
-                Bitmap.CompressFormat.PNG,
-                100,
-                output
-            )
-        }
     }
 
     private fun processFrame(source: Bitmap) {
@@ -740,10 +746,6 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    /**
-     * Возвращена прежняя схема:
-     * отдельный экземпляр Stockfish на один анализ.
-     */
     private fun analyzeWithStockfish(fen: String) {
         try {
             StockfishEngine(applicationContext).use { engine ->
