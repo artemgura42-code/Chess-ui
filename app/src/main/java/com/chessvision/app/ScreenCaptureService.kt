@@ -1,3 +1,4 @@
+
 package com.chessvision.app
 
 import android.app.Notification
@@ -55,14 +56,14 @@ class ScreenCaptureService : Service() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // Распознавание выполняется отдельно от главного потока Android.
     private val processingExecutor = Executors.newSingleThreadExecutor()
-
-    // Stockfish работает отдельно, чтобы не задерживать распознавание кадров.
     private val engineExecutor = Executors.newSingleThreadExecutor()
 
     private var recognizer: ChessPieceRecognizer? = null
     private val tracker = ChessGameTracker()
+
+    // Плавающая панель CHESS VISION.
+    private var overlayManager: ChessOverlayManager? = null
 
     private var lastQueuedAt = 0L
     private var candidatePlacement = ""
@@ -96,6 +97,10 @@ class ScreenCaptureService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+
+        overlayManager = ChessOverlayManager(this) {
+            stopSelf()
+        }
     }
 
     override fun onStartCommand(
@@ -158,6 +163,7 @@ class ScreenCaptureService : Service() {
             }
 
             mediaProjection = projection
+
             projection.registerCallback(
                 projectionCallback,
                 mainHandler
@@ -194,12 +200,24 @@ class ScreenCaptureService : Service() {
             )
 
             recognitionMessage = "Захват активен. Ищу шахматную доску..."
+
+            // Показываем плавающую панель поверх Lichess.
+            overlayManager?.show()
+
+            overlayManager?.update(
+                lastBestMove,
+                lastEvaluation,
+                engineMessage
+            )
+
             publishState()
 
         } catch (e: Exception) {
             e.printStackTrace()
+
             recognitionMessage =
                 "Ошибка запуска захвата: ${e.message}"
+
             publishState()
             stopSelf()
         }
@@ -241,8 +259,10 @@ class ScreenCaptureService : Service() {
                     processFrame(bitmap)
                 } catch (e: Exception) {
                     e.printStackTrace()
+
                     recognitionMessage =
                         "Ошибка обработки кадра: ${e.message}"
+
                     publishState()
                 } finally {
                     if (!bitmap.isRecycled) {
@@ -416,18 +436,20 @@ class ScreenCaptureService : Service() {
 
                 trackedPlayerColor =
                     outcome.playerColor ?: recognized.playerColor
-if (!wasStarted) {
-    gameStarted = true
 
-    // Учитываем также ходы, которые были сделаны
-    // до первого успешного распознавания доски.
-    totalMoves = outcome.movesDetected
+                if (!wasStarted) {
+                    gameStarted = true
 
-    lastSubmittedFen = ""
-    engineMessage = "Партия восстановлена. Проверяю очередь хода..."
-} else if (outcome.advanced) {
-    totalMoves += outcome.movesDetected
-}
+                    // Учитываем также ходы, которые были сделаны
+                    // до первого успешного распознавания доски.
+                    totalMoves = outcome.movesDetected
+
+                    lastSubmittedFen = ""
+                    engineMessage =
+                        "Партия восстановлена. Проверяю очередь хода..."
+                } else if (outcome.advanced) {
+                    totalMoves += outcome.movesDetected
+                }
 
                 // Проверяем, не наступила ли очередь игрока.
                 scheduleStockfishIfNeeded()
@@ -476,6 +498,7 @@ if (!wasStarted) {
             } else {
                 "Ход белых. Ожидаю ответ соперника..."
             }
+
             return
         }
 
@@ -493,14 +516,17 @@ if (!wasStarted) {
             }
         } catch (e: Exception) {
             lastSubmittedFen = ""
+
             engineMessage =
                 "Не удалось запустить анализ: ${e.message}"
+
             publishState()
         }
     }
 
     /**
-     * Анализирует позицию и отправляет уведомление.
+     * Анализирует позицию и обновляет плавающую панель.
+     * Уведомления с рекомендациями ходов не отправляются.
      */
     private fun analyzeWithStockfish(fen: String) {
         try {
@@ -508,8 +534,7 @@ if (!wasStarted) {
                 it.analyze(fen)
             }
 
-            // Если за время анализа позиция изменилась,
-            // старый результат не отправляем.
+            // Не показываем результат устаревшей позиции.
             if (latestFen != fen) {
                 return
             }
@@ -524,21 +549,13 @@ if (!wasStarted) {
                 return
             }
 
-            val notificationStatus =
-                MoveNotifier.show(applicationContext, result)
-
             lastBestMove =
                 MoveNotifier.formatMove(result.bestMove)
 
             lastEvaluation = result.evaluation
 
-            if (notificationStatus == "Уведомление отправлено") {
-                engineMessage =
-                    "Лучший ход отправлен. Глубина: ${result.depth}"
-            } else {
-                engineMessage = notificationStatus
-                lastSubmittedFen = ""
-            }
+            engineMessage =
+                "Лучший ход обновлён. Глубина: ${result.depth}"
 
             publishState()
 
@@ -548,6 +565,7 @@ if (!wasStarted) {
             if (latestFen == fen) {
                 engineMessage =
                     "Ошибка Stockfish: ${e.message ?: "неизвестная ошибка"}"
+
                 lastSubmittedFen = ""
                 publishState()
             }
@@ -555,7 +573,8 @@ if (!wasStarted) {
     }
 
     /**
-     * Передаёт актуальное состояние MainActivity.
+     * Передаёт актуальное состояние MainActivity
+     * и обновляет плавающую панель.
      */
     private fun publishState() {
         val intent = Intent(ACTION_STATE_UPDATE).apply {
@@ -574,6 +593,12 @@ if (!wasStarted) {
         }
 
         sendBroadcast(intent)
+
+        overlayManager?.update(
+            lastBestMove,
+            lastEvaluation,
+            engineMessage
+        )
     }
 
     private fun createNotificationChannel() {
@@ -622,6 +647,10 @@ if (!wasStarted) {
     }
 
     override fun onDestroy() {
+        // Убираем плавающую панель.
+        overlayManager?.hide()
+        overlayManager = null
+
         imageReader?.setOnImageAvailableListener(null, null)
 
         virtualDisplay?.release()
