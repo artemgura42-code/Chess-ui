@@ -2,11 +2,10 @@
 package com.chessvision.app
 
 import android.Manifest
-import android.content.pm.PackageManager
-import androidx.core.app.ActivityCompat
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.projection.MediaProjectionManager
@@ -36,10 +35,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.ActivityCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import java.io.File
 
 private val DarkBackground = Color(0xFF101510)
 private val PanelBackground = Color(0xFF1B241C)
@@ -49,6 +50,19 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Разрешение на уведомления Android 13+.
+        if (
+            Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                200
+            )
+        }
 
         setContent {
             ChessVisionApp(
@@ -104,7 +118,7 @@ fun ChessVisionApp(
         mutableStateOf("Ожидание захвата экрана")
     }
 
-    // Игровые параметры FEN.
+    // Параметры FEN.
     var sideToMove by remember { mutableStateOf("w") }
 
     var whiteKingSide by remember { mutableStateOf(false) }
@@ -115,6 +129,25 @@ fun ChessVisionApp(
     var enPassant by remember { mutableStateOf("-") }
     var halfmoveClock by remember { mutableStateOf("0") }
     var fullmoveNumber by remember { mutableStateOf("1") }
+
+    // Настройки Stockfish.
+    var botMode by remember { mutableStateOf(false) }
+
+    var lastNotifiedFen by remember {
+        mutableStateOf("")
+    }
+
+    var engineMessage by remember {
+        mutableStateOf("Stockfish ожидает позицию")
+    }
+
+    var lastBestMove by remember {
+        mutableStateOf("")
+    }
+
+    var lastEvaluation by remember {
+        mutableStateOf("")
+    }
 
     val captureLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -129,7 +162,7 @@ fun ChessVisionApp(
         }
     }
 
-    // Автоматический поиск доски и распознавание новой позиции.
+    // Автоматическое распознавание доски.
     LaunchedEffect(capturing) {
 
         if (!capturing) {
@@ -143,7 +176,7 @@ fun ChessVisionApp(
         try {
             while (isActive) {
 
-                val file = java.io.File(
+                val file = File(
                     context.filesDir,
                     "last_screen_capture.png"
                 )
@@ -268,7 +301,7 @@ fun ChessVisionApp(
         }
     }
 
-    // Проверка игровых параметров.
+    // Проверка игровых параметров FEN.
     val halfmove = halfmoveClock.toIntOrNull()
     val fullmove = fullmoveNumber.toIntOrNull()
 
@@ -298,6 +331,59 @@ fun ChessVisionApp(
         }
     }
 
+    // Автоматический анализ новой позиции.
+    LaunchedEffect(
+        botMode,
+        finalFen,
+        recognitionResult?.reliable
+    ) {
+        if (!botMode) {
+            engineMessage = "Режим Stockfish выключен"
+            return@LaunchedEffect
+        }
+
+        val fen = finalFen
+
+        if (fen == null || recognitionResult?.reliable != true) {
+            engineMessage = "Ожидаю надёжного распознавания позиции"
+            return@LaunchedEffect
+        }
+
+        if (fen == lastNotifiedFen) {
+            return@LaunchedEffect
+        }
+
+        // Небольшая задержка, чтобы не анализировать промежуточный кадр.
+        delay(1200)
+
+        try {
+            engineMessage = "Stockfish анализирует позицию..."
+
+            val result = withContext(Dispatchers.IO) {
+                StockfishEngine(context).use { engine ->
+                    engine.analyze(fen)
+                }
+            }
+
+            // Защита от устаревшего результата.
+            if (!botMode || fen != finalFen) {
+                return@LaunchedEffect
+            }
+
+            MoveNotifier.show(context, result)
+
+            lastNotifiedFen = fen
+            lastBestMove = result.bestMove
+            lastEvaluation = result.evaluation
+
+            engineMessage =
+                "Анализ завершён. Глубина: ${result.depth}"
+
+        } catch (e: Exception) {
+            engineMessage = "Ошибка Stockfish: ${e.message}"
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -314,7 +400,7 @@ fun ChessVisionApp(
         )
 
         Text(
-            "Распознавание шахматных позиций",
+            "Автоматическое распознавание и анализ",
             color = Color.LightGray,
             fontSize = 13.sp
         )
@@ -493,6 +579,81 @@ fun ChessVisionApp(
                 fontSize = 13.sp
             )
 
+            Spacer(Modifier.height(22.dp))
+
+            // Панель Stockfish.
+            SectionTitle("STOCKFISH 19 — АНАЛИЗ")
+
+            Surface(
+                color = PanelBackground,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                "Режим анализа",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            Text(
+                                "Уведомления с лучшим ходом",
+                                color = Color.Gray,
+                                fontSize = 12.sp
+                            )
+                        }
+
+                        Switch(
+                            checked = botMode,
+                            onCheckedChange = { botMode = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = LimeColor,
+                                checkedTrackColor = Color(0xFF526B35)
+                            )
+                        )
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+
+                    Text(
+                        engineMessage,
+                        color = LimeColor,
+                        fontSize = 13.sp
+                    )
+
+                    if (lastBestMove.isNotEmpty()) {
+                        Spacer(Modifier.height(12.dp))
+
+                        Text(
+                            "Последний лучший ход",
+                            color = Color.Gray,
+                            fontSize = 12.sp
+                        )
+
+                        Text(
+                            lastBestMove,
+                            color = LimeColor,
+                            fontSize = 25.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Text(
+                            "Оценка: $lastEvaluation",
+                            color = Color.White,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+
             Spacer(Modifier.height(24.dp))
 
             SectionTitle("ПАРАМЕТРЫ ПОЗИЦИИ FEN")
@@ -580,7 +741,7 @@ fun ChessVisionApp(
             )
 
             if (!validEnPassant) {
-                InfoText("Допустимы '-' или клетка e3/e6.")
+                InfoText("Допустимы '-' или клетки e3/e6.")
             }
 
             Spacer(Modifier.height(12.dp))
