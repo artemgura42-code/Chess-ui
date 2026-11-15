@@ -1,3 +1,4 @@
+
 pluginManagement {
     repositories {
         google()
@@ -11,8 +12,11 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven {
+            url = uri("https://jitpack.io")
+        }
     }
 }
 
-rootProject.name = "CHESS VISION"
+rootProject.name = "CHESS-VISION"
 include(":app")
