@@ -58,4 +58,5 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.1")
+implementation("com.github.bhlangonijr:chesslib:1.3.7")
 }
