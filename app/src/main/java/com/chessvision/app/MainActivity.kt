@@ -149,6 +149,11 @@ fun ChessVisionApp(
         mutableStateOf("")
     }
 
+    // Статус тестового уведомления.
+    var notificationTestMessage by remember {
+        mutableStateOf("Уведомления ещё не проверялись")
+    }
+
     val captureLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -344,20 +349,26 @@ fun ChessVisionApp(
 
         val fen = finalFen
 
-        if (fen == null || recognitionResult?.reliable != true) {
-            engineMessage = "Ожидаю надёжного распознавания позиции"
+        if (fen == null) {
+            engineMessage = "Ожидаю корректную FEN-позицию"
+            return@LaunchedEffect
+        }
+
+        if (recognitionResult?.reliable != true) {
+            engineMessage = "Низкая уверенность распознавания"
             return@LaunchedEffect
         }
 
         if (fen == lastNotifiedFen) {
+            engineMessage = "Эта позиция уже проанализирована"
             return@LaunchedEffect
         }
 
-        // Небольшая задержка, чтобы не анализировать промежуточный кадр.
+        // Ожидаем стабилизации распознанной позиции.
         delay(1200)
 
         try {
-            engineMessage = "Stockfish анализирует позицию..."
+            engineMessage = "Stockfish запускается..."
 
             val result = withContext(Dispatchers.IO) {
                 StockfishEngine(context).use { engine ->
@@ -365,22 +376,46 @@ fun ChessVisionApp(
                 }
             }
 
-            // Защита от устаревшего результата.
+            // Проверяем, что анализ всё ещё актуален.
             if (!botMode || fen != finalFen) {
                 return@LaunchedEffect
             }
 
-            MoveNotifier.show(context, result)
+            if (
+                result.bestMove.isBlank() ||
+                result.bestMove == "(none)" ||
+                result.bestMove == "0000"
+            ) {
+                engineMessage = "Stockfish не нашёл доступный ход"
+                return@LaunchedEffect
+            }
 
-            lastNotifiedFen = fen
-            lastBestMove = result.bestMove
+            engineMessage = "Отправляю лучший ход..."
+
+            // Отправляем уведомление.
+            val notificationStatus =
+                MoveNotifier.show(context, result)
+
+            // Сохраняем красивую запись хода.
+            lastBestMove =
+                MoveNotifier.formatMove(result.bestMove)
+
             lastEvaluation = result.evaluation
 
-            engineMessage =
-                "Анализ завершён. Глубина: ${result.depth}"
+            if (notificationStatus == "Уведомление отправлено") {
+
+                lastNotifiedFen = fen
+
+                engineMessage =
+                    "Лучший ход отправлен. Глубина: ${result.depth}"
+
+            } else {
+                engineMessage = notificationStatus
+            }
 
         } catch (e: Exception) {
-            engineMessage = "Ошибка Stockfish: ${e.message}"
+            engineMessage =
+                "Ошибка Stockfish: ${e.message ?: "неизвестная ошибка"}"
         }
     }
 
@@ -466,6 +501,32 @@ fun ChessVisionApp(
                 color = Color.LightGray
             )
         }
+
+        // Тест уведомлений.
+        Spacer(Modifier.height(14.dp))
+
+        Button(
+            onClick = {
+                notificationTestMessage =
+                    MoveNotifier.showTest(context)
+            },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = LimeColor,
+                contentColor = Color.Black
+            )
+        ) {
+            Text(
+                "ПРОВЕРИТЬ УВЕДОМЛЕНИЯ",
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Text(
+            notificationTestMessage,
+            color = Color.LightGray,
+            fontSize = 12.sp
+        )
 
         Spacer(Modifier.height(22.dp))
 
