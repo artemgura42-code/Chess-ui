@@ -27,6 +27,14 @@ import java.util.concurrent.Executors
 
 class ScreenCaptureService : Service() {
 
+    private data class BoardOverlayState(
+        val left: Int,
+        val top: Int,
+        val width: Int,
+        val height: Int,
+        val whiteAtBottom: Boolean
+    )
+
     companion object {
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_DATA = "projection_data"
@@ -62,7 +70,7 @@ class ScreenCaptureService : Service() {
     private var recognizer: ChessPieceRecognizer? = null
     private val tracker = ChessGameTracker()
 
-    // Плавающая панель CHESS VISION.
+    // Плавающая панель и стрелка CHESS VISION.
     private var overlayManager: ChessOverlayManager? = null
 
     private var lastQueuedAt = 0L
@@ -81,10 +89,21 @@ class ScreenCaptureService : Service() {
     @Volatile
     private var lastSubmittedFen = ""
 
+    @Volatile
+    private var latestBoardOverlay: BoardOverlayState? = null
+
     private var trackerMessage = "Ожидаю начальную позицию партии"
     private var engineMessage = "Stockfish ожидает начала партии"
+
+    // Текстовый ход для панели.
     private var lastBestMove = ""
+
+    // Исходный UCI-ход для рисования стрелки.
+    @Volatile
+    private var lastBestMoveUci = ""
+
     private var lastEvaluation = ""
+
     private var recognitionMessage = "Ожидание захвата экрана"
 
     private val projectionCallback =
@@ -201,7 +220,7 @@ class ScreenCaptureService : Service() {
 
             recognitionMessage = "Захват активен. Ищу шахматную доску..."
 
-            // Показываем плавающую панель поверх Lichess.
+            // Показываем панель и прозрачный слой для стрелки.
             overlayManager?.show()
 
             overlayManager?.update(
@@ -349,8 +368,12 @@ class ScreenCaptureService : Service() {
         val bounds = ChessBoardDetector.detect(source)
 
         if (bounds == null) {
+            latestBoardOverlay = null
+            overlayManager?.clearArrow()
+
             recognitionMessage =
                 "Доска не найдена. Продолжаю поиск..."
+
             publishState()
             return
         }
@@ -367,6 +390,9 @@ class ScreenCaptureService : Service() {
         )
 
         if (width <= 0 || height <= 0) {
+            latestBoardOverlay = null
+            overlayManager?.clearArrow()
+
             recognitionMessage = "Некорректные размеры доски"
             publishState()
             return
@@ -397,9 +423,25 @@ class ScreenCaptureService : Service() {
         if (!recognized.reliable) {
             candidatePlacement = ""
             candidateCount = 0
+
+            latestBoardOverlay = null
+            overlayManager?.clearArrow()
+
             publishState()
             return
         }
+
+        // Сохраняем координаты доски для рисования стрелки.
+        val bottomColor =
+            trackedPlayerColor ?: recognized.playerColor
+
+        latestBoardOverlay = BoardOverlayState(
+            left = left,
+            top = top,
+            width = width,
+            height = height,
+            whiteAtBottom = bottomColor == "w"
+        )
 
         val placement = recognized.placement
 
@@ -437,11 +479,18 @@ class ScreenCaptureService : Service() {
                 trackedPlayerColor =
                     outcome.playerColor ?: recognized.playerColor
 
+                // Обновляем ориентацию доски после определения цвета.
+                latestBoardOverlay = BoardOverlayState(
+                    left = left,
+                    top = top,
+                    width = width,
+                    height = height,
+                    whiteAtBottom = trackedPlayerColor == "w"
+                )
+
                 if (!wasStarted) {
                     gameStarted = true
 
-                    // Учитываем также ходы, которые были сделаны
-                    // до первого успешного распознавания доски.
                     totalMoves = outcome.movesDetected
 
                     lastSubmittedFen = ""
@@ -462,6 +511,20 @@ class ScreenCaptureService : Service() {
                 trackedPlayerColor = null
                 totalMoves = 0
                 lastSubmittedFen = ""
+
+                lastBestMove = ""
+                lastBestMoveUci = ""
+                lastEvaluation = ""
+
+                latestBoardOverlay = BoardOverlayState(
+                    left = left,
+                    top = top,
+                    width = width,
+                    height = height,
+                    whiteAtBottom = recognized.playerColor == "w"
+                )
+
+                overlayManager?.clearArrow()
 
                 trackerMessage = outcome.status
                 engineMessage = "Ожидаю начала новой партии"
@@ -493,6 +556,12 @@ class ScreenCaptureService : Service() {
         val sideToMove = parts[1]
 
         if (sideToMove != playerColor) {
+            lastBestMove = ""
+            lastBestMoveUci = ""
+            lastEvaluation = ""
+
+            overlayManager?.clearArrow()
+
             engineMessage = if (playerColor == "w") {
                 "Ход чёрных. Ожидаю ответ соперника..."
             } else {
@@ -503,6 +572,13 @@ class ScreenCaptureService : Service() {
         }
 
         if (fen == lastSubmittedFen) return
+
+        // Убираем рекомендацию от предыдущей позиции.
+        lastBestMove = ""
+        lastBestMoveUci = ""
+        lastEvaluation = ""
+
+        overlayManager?.clearArrow()
 
         // Сохраняем позицию до запуска анализа,
         // чтобы не запустить несколько одинаковых задач.
@@ -544,11 +620,19 @@ class ScreenCaptureService : Service() {
                 result.bestMove == "(none)" ||
                 result.bestMove == "0000"
             ) {
+                lastBestMove = ""
+                lastBestMoveUci = ""
+                lastEvaluation = ""
+
                 engineMessage = "Stockfish не нашёл доступный ход"
                 publishState()
                 return
             }
 
+            // Исходный UCI-ход нужен для координат стрелки.
+            lastBestMoveUci = result.bestMove
+
+            // Отформатированный ход оставляем для панели.
             lastBestMove =
                 MoveNotifier.formatMove(result.bestMove)
 
@@ -563,6 +647,10 @@ class ScreenCaptureService : Service() {
             e.printStackTrace()
 
             if (latestFen == fen) {
+                lastBestMove = ""
+                lastBestMoveUci = ""
+                lastEvaluation = ""
+
                 engineMessage =
                     "Ошибка Stockfish: ${e.message ?: "неизвестная ошибка"}"
 
@@ -574,7 +662,7 @@ class ScreenCaptureService : Service() {
 
     /**
      * Передаёт актуальное состояние MainActivity
-     * и обновляет плавающую панель.
+     * и обновляет плавающую панель и стрелку.
      */
     private fun publishState() {
         val intent = Intent(ACTION_STATE_UPDATE).apply {
@@ -599,6 +687,27 @@ class ScreenCaptureService : Service() {
             lastEvaluation,
             engineMessage
         )
+
+        // Рисуем стрелку по координатам последней найденной доски.
+        val board = latestBoardOverlay
+        val move = lastBestMoveUci
+
+        if (
+            board != null &&
+            move.length >= 4 &&
+            gameStarted
+        ) {
+            overlayManager?.updateArrow(
+                move = move,
+                boardLeft = board.left,
+                boardTop = board.top,
+                boardWidth = board.width,
+                boardHeight = board.height,
+                whiteAtBottom = board.whiteAtBottom
+            )
+        } else {
+            overlayManager?.clearArrow()
+        }
     }
 
     private fun createNotificationChannel() {
@@ -647,9 +756,12 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onDestroy() {
-        // Убираем плавающую панель.
+        // Убираем панель и стрелку.
         overlayManager?.hide()
         overlayManager = null
+
+        latestBoardOverlay = null
+        lastBestMoveUci = ""
 
         imageReader?.setOnImageAvailableListener(null, null)
 
