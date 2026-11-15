@@ -14,8 +14,11 @@ data class ChessTrackerResult(
 class ChessGameTracker {
 
     companion object {
-        private const val MAX_SEARCH_DEPTH = 6
-        private const val BEAM_WIDTH = 64
+        // Ищем позицию на глубине до 12 полуходов.
+        private const val MAX_SEARCH_DEPTH = 12
+
+        // Сохраняем 256 наиболее перспективных вариантов на каждом уровне.
+        private const val BEAM_WIDTH = 256
 
         const val START_PLACEMENT =
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
@@ -29,7 +32,6 @@ class ChessGameTracker {
 
     private var board: Board? = null
     private var playerColor: String? = null
-
     private var lastPlacement: String? = null
 
     @Synchronized
@@ -39,23 +41,20 @@ class ChessGameTracker {
         lastPlacement = null
     }
 
+    /**
+     * Начинает отслеживание.
+     *
+     * Теперь допускается первое распознавание не только
+     * начальной позиции, но и позиции после нескольких ходов.
+     */
     @Synchronized
     fun start(
         initialPlacement: String,
         detectedPlayerColor: String
     ): ChessTrackerResult {
 
-        if (initialPlacement != START_PLACEMENT) {
-            return ChessTrackerResult(
-                null,
-                null,
-                "Ожидаю начальную позицию партии",
-                false,
-                0
-            )
-        }
-
-        if (detectedPlayerColor != "w" &&
+        if (
+            detectedPlayerColor != "w" &&
             detectedPlayerColor != "b"
         ) {
             return ChessTrackerResult(
@@ -67,20 +66,57 @@ class ChessGameTracker {
             )
         }
 
-        board = Board()
-        playerColor = detectedPlayerColor
-        lastPlacement = START_PLACEMENT
+        val initialBoard = Board()
 
-        return ChessTrackerResult(
-            fen = board!!.fen,
-            playerColor = playerColor,
-            status = if (playerColor == "w") {
+        val found = if (initialPlacement == START_PLACEMENT) {
+            SearchNode(
+                board = initialBoard,
+                path = emptyList(),
+                score = 0
+            )
+        } else {
+            findPosition(
+                startBoard = initialBoard,
+                targetPlacement = initialPlacement
+            )
+        }
+
+        if (found == null) {
+            return ChessTrackerResult(
+                null,
+                null,
+                "Позиция найдена, но не удалось восстановить историю ходов. Продолжаю наблюдение",
+                false,
+                0
+            )
+        }
+
+        board = found.board
+        playerColor = detectedPlayerColor
+        lastPlacement = initialPlacement
+
+        val status = if (found.path.isEmpty()) {
+            if (detectedPlayerColor == "w") {
                 "Партия начата. Вы играете белыми"
             } else {
                 "Партия начата. Вы играете чёрными"
-            },
+            }
+        } else {
+            val colorText = if (detectedPlayerColor == "w") {
+                "белыми"
+            } else {
+                "чёрными"
+            }
+
+            "Позиция восстановлена после ${found.path.size} полуходов. Вы играете $colorText"
+        }
+
+        return ChessTrackerResult(
+            fen = found.board.fen,
+            playerColor = playerColor,
+            status = status,
             advanced = true,
-            movesDetected = 0
+            movesDetected = found.path.size
         )
     }
 
@@ -95,7 +131,7 @@ class ChessGameTracker {
             return ChessTrackerResult(
                 null,
                 null,
-                "Сначала дождитесь начальной позиции",
+                "Ожидаю восстановления позиции партии",
                 false,
                 0
             )
@@ -112,21 +148,20 @@ class ChessGameTracker {
         }
 
         if (observedPlacement == START_PLACEMENT) {
-
             reset()
 
             return ChessTrackerResult(
                 null,
                 null,
-                "Обнаружена новая начальная позиция. Начните новую партию",
+                "Обнаружена новая начальная позиция. Ожидаю начала партии",
                 false,
                 0
             )
         }
 
         val found = findPosition(
-            currentBoard,
-            observedPlacement
+            startBoard = currentBoard,
+            targetPlacement = observedPlacement
         )
 
         if (found == null) {
@@ -145,16 +180,27 @@ class ChessGameTracker {
         return ChessTrackerResult(
             fen = found.board.fen,
             playerColor = playerColor,
-            status = "Обнаружено ходов: ${found.path.size}",
+            status = "Обнаружено новых полуходов: ${found.path.size}",
             advanced = true,
             movesDetected = found.path.size
         )
     }
 
+    /**
+     * Восстанавливает позицию поиском легальных ходов.
+     */
     private fun findPosition(
         startBoard: Board,
         targetPlacement: String
     ): SearchNode? {
+
+        if (startBoard.fen.substringBefore(" ") == targetPlacement) {
+            return SearchNode(
+                board = startBoard,
+                path = emptyList(),
+                score = 0
+            )
+        }
 
         var beam = listOf(
             SearchNode(
@@ -168,6 +214,7 @@ class ChessGameTracker {
         )
 
         val visited = HashSet<String>()
+        visited.add(startBoard.fen)
 
         for (depth in 1..MAX_SEARCH_DEPTH) {
 
@@ -180,7 +227,6 @@ class ChessGameTracker {
                 for (move in legalMoves) {
 
                     val nextBoard = node.board.clone()
-
                     nextBoard.doMove(move)
 
                     val fen = nextBoard.fen
@@ -188,6 +234,7 @@ class ChessGameTracker {
 
                     val path = node.path + move.toString()
 
+                    // Если нашли точное совпадение — возвращаем позицию.
                     if (placement == targetPlacement) {
                         return SearchNode(
                             board = nextBoard,
@@ -196,9 +243,7 @@ class ChessGameTracker {
                         )
                     }
 
-                    val key = fen
-
-                    if (!visited.add(key)) {
+                    if (!visited.add(fen)) {
                         continue
                     }
 
@@ -229,6 +274,10 @@ class ChessGameTracker {
         return null
     }
 
+    /**
+     * Считает количество различающихся клеток.
+     * Чем меньше число, тем ближе позиция к распознанной.
+     */
     private fun difference(
         first: String,
         second: String
@@ -248,6 +297,9 @@ class ChessGameTracker {
         return differences
     }
 
+    /**
+     * Преобразует FEN placement в массив из 64 клеток.
+     */
     private fun expandPlacement(
         placement: String
     ): CharArray? {
@@ -260,13 +312,19 @@ class ChessGameTracker {
         var index = 0
 
         for (row in rows) {
+
+            val rowStart = index
+
             for (character in row) {
 
                 if (character.isDigit()) {
 
                     val count = character.digitToInt()
 
-                    if (count !in 1..8 || index + count > 64) {
+                    if (
+                        count !in 1..8 ||
+                        index + count > 64
+                    ) {
                         return null
                     }
 
@@ -276,10 +334,7 @@ class ChessGameTracker {
 
                 } else {
 
-                    if (
-                        character !in
-                        "KQRBNPkqrbnp"
-                    ) {
+                    if (character !in "KQRBNPkqrbnp") {
                         return null
                     }
 
@@ -287,6 +342,11 @@ class ChessGameTracker {
 
                     result[index++] = character
                 }
+            }
+
+            // В каждой строке FEN должно быть ровно 8 клеток.
+            if (index - rowStart != 8) {
+                return null
             }
         }
 
