@@ -24,7 +24,13 @@ class ChessPieceRecognizer(context: Context) : Closeable {
 
     companion object {
         private const val MODEL_NAME = "chess-tiles-v2.onnx"
-        private const val CONFIDENCE_LIMIT = 0.70f
+
+        private const val MIN_MEAN_CONFIDENCE = 0.75f
+        private const val LOW_CONFIDENCE_LIMIT = 0.30f
+        private const val MIN_SINGLE_CONFIDENCE = 0.10f
+        private const val MAX_LOW_CONFIDENCE_SQUARES = 8
+
+        private const val ORIENTATION_CONFIDENCE = 0.35f
 
         // Порядок классов модели Fenshot.
         // 1 — пустая клетка.
@@ -34,7 +40,7 @@ class ChessPieceRecognizer(context: Context) : Closeable {
     private val environment = OrtEnvironment.getEnvironment()
     private val session: OrtSession
 
-    // Запоминаем последнюю достоверно определённую ориентацию.
+    // Последняя достоверно определённая ориентация.
     private var lastKnownBoardFlipped = false
 
     init {
@@ -60,7 +66,9 @@ class ChessPieceRecognizer(context: Context) : Closeable {
     }
 
     @Synchronized
-    fun recognize(boardBitmap: Bitmap): PieceRecognitionResult {
+    fun recognize(
+        boardBitmap: Bitmap
+    ): PieceRecognitionResult {
 
         require(!boardBitmap.isRecycled) {
             "Изображение доски недоступно"
@@ -136,8 +144,7 @@ class ChessPieceRecognizer(context: Context) : Closeable {
                         "Некорректный размер результата модели"
                     }
 
-                    // Сначала сохраняем распознавание в экранной ориентации.
-                    // Индексы: [ряд снизу вверх][столбец слева направо].
+                    // Распознавание в экранной ориентации.
                     val screenBoard = Array(8) {
                         CharArray(8) { '.' }
                     }
@@ -174,6 +181,7 @@ class ChessPieceRecognizer(context: Context) : Closeable {
                             }
 
                             screenBoard[rank][file] = piece
+
                             screenConfidence[rank][file] =
                                 bestProbability
 
@@ -181,48 +189,67 @@ class ChessPieceRecognizer(context: Context) : Closeable {
                         }
                     }
 
-                    // Определяем цвет фигур в нижнем ряду экрана.
-                    // Для начальной позиции там должно быть 8 фигур.
+                    // Определяем цвет фигур одновременно
+                    // по нижнему и верхнему рядам.
                     var whiteAtBottom = 0
                     var blackAtBottom = 0
 
+                    var whiteAtTop = 0
+                    var blackAtTop = 0
+
                     for (file in 0 until 8) {
 
-                        val piece = screenBoard[0][file]
-                        val confidence =
+                        val bottomPiece = screenBoard[0][file]
+                        val bottomConfidence =
                             screenConfidence[0][file]
 
                         if (
-                            piece != '.' &&
-                            confidence >= 0.50f
+                            bottomPiece != '.' &&
+                            bottomConfidence >= ORIENTATION_CONFIDENCE
                         ) {
-                            if (piece.isUpperCase()) {
+                            if (bottomPiece.isUpperCase()) {
                                 whiteAtBottom++
                             } else {
                                 blackAtBottom++
                             }
                         }
+
+                        val topPiece = screenBoard[7][file]
+                        val topConfidence =
+                            screenConfidence[7][file]
+
+                        if (
+                            topPiece != '.' &&
+                            topConfidence >= ORIENTATION_CONFIDENCE
+                        ) {
+                            if (topPiece.isUpperCase()) {
+                                whiteAtTop++
+                            } else {
+                                blackAtTop++
+                            }
+                        }
                     }
 
-                    // Определяем ориентацию только при достаточно
-                    // уверенном распознавании нижнего ряда.
+                    // Белые снизу, чёрные сверху.
                     if (
                         whiteAtBottom >= 5 &&
-                        whiteAtBottom > blackAtBottom
+                        blackAtTop >= 5
                     ) {
                         lastKnownBoardFlipped = false
+                    }
 
-                    } else if (
+                    // Чёрные снизу, белые сверху.
+                    else if (
                         blackAtBottom >= 5 &&
-                        blackAtBottom > whiteAtBottom
+                        whiteAtTop >= 5
                     ) {
                         lastKnownBoardFlipped = true
                     }
 
                     val boardFlipped = lastKnownBoardFlipped
 
-                    // Преобразуем экранные клетки в стандартные
-                    // шахматные координаты.
+                    // Переводим экранные координаты
+                    // в стандартные шахматные координаты.
                     val board = Array(8) {
                         CharArray(8) { '.' }
                     }
@@ -273,14 +300,23 @@ class ChessPieceRecognizer(context: Context) : Closeable {
                     val minConfidence =
                         allConfidences.minOrNull() ?: 0f
 
+                    val lowConfidenceCount =
+                        allConfidences.count {
+                            it < LOW_CONFIDENCE_LIMIT
+                        }
+
+                    // Не требуем, чтобы каждая клетка
+                    // обязательно имела уверенность 0.70.
                     val reliable =
-                        minConfidence >= CONFIDENCE_LIMIT
+                        meanConfidence >= MIN_MEAN_CONFIDENCE &&
+                        minConfidence >= MIN_SINGLE_CONFIDENCE &&
+                        lowConfidenceCount <= MAX_LOW_CONFIDENCE_SQUARES
 
                     val castling = inferCastling(board)
 
-                    // Это предварительная FEN.
-                    // Исторические права рокировки и очередь хода
-                    // будут отслеживаться в игровом трекере.
+                    // Предварительная FEN.
+                    // Очередь хода и исторические права
+                    // восстанавливаются ChessGameTracker.
                     val fen = "$placement w $castling - 0 1"
 
                     return PieceRecognitionResult(
